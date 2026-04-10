@@ -6,12 +6,17 @@ function mockRes() {
   const res = {
     statusCode: 200,
     body: undefined as unknown,
+    headers: {} as Record<string, string>,
     status(code: number) {
       this.statusCode = code;
       return this;
     },
     json(data: unknown) {
       this.body = data;
+      return this;
+    },
+    setHeader(key: string, value: string) {
+      this.headers[key] = value;
       return this;
     },
   };
@@ -25,7 +30,9 @@ describe('GET /api/hello', () => {
 
     handler(req, res);
 
-    expect((res as unknown as { statusCode: number }).statusCode).toBe(200);
-    expect((res as unknown as { body: unknown }).body).toEqual({ message: 'Hello, World!' });
+    const r = res as unknown as { statusCode: number; body: unknown; headers: Record<string, string> };
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual({ message: 'Hello, World!' });
+    expect(r.headers['Cache-Control']).toBe('no-store');
   });
 });
