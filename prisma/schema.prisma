@@ -1,0 +1,23 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+}
+
+model Device {
+  deviceId     String   @id @map("device_id")
+  registeredAt DateTime @default(now()) @db.Timestamptz @map("registered_at")
+
+  @@map("devices")
+}
+
+model CallCount {
+  deviceId String   @map("device_id")
+  date     DateTime @db.Date
+  count    Int      @default(1)
+
+  @@unique([deviceId, date])
+  @@map("call_counts")
+}
