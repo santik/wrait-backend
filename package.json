@@ -7,6 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "postinstall": "prisma generate",
     "type-check": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -16,6 +17,7 @@
   "devDependencies": {
     "@prisma/config": "^7.7.0",
     "@types/node": "^20.0.0",
+    "@types/pg": "^8.20.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vercel/node": "^5.0.0",
@@ -29,8 +31,10 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.7.0",
     "@prisma/client": "^7.7.0",
-    "dotenv": "^17.4.1"
+    "dotenv": "^17.4.1",
+    "pg": "^8.20.0"
   },
   "overrides": {
     "tar": "^7.5.13"
