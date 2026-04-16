@@ -27,7 +27,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       create: { deviceId },
     });
     console.log('Device registered successfully with ID', deviceId);
-    return json(res, { ok: true }, 200);
+    return json(res, { ok: true }, 201);
   } catch (error) {
     console.error('Failed to register device:', error);
     return json(res, { error: 'Internal server error' }, 500);
