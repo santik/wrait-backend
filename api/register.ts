@@ -11,10 +11,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const deviceId = req.headers['x-device-id'];
 
   if (proxySecret !== process.env.PROXY_SECRET) {
+    console.error('PROXY SECRET MISMATCH', proxySecret, process.env.PROXY_SECRET);
     return json(res, { error: 'Unauthorized' }, 401);
   }
 
   if (!deviceId || typeof deviceId !== 'string' || !/^[a-fA-F0-9]{64}$/.test(deviceId)) {
+    console.error('INVALID DEVICE ID', deviceId);
     return json(res, { error: 'Invalid device ID' }, 400);
   }
 
@@ -24,7 +26,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       update: {},
       create: { deviceId },
     });
-
+    console.log('Device registered successfully with ID', deviceId);
     return json(res, { ok: true }, 200);
   } catch (error) {
     console.error('Failed to register device:', error);

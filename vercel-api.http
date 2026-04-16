@@ -1,5 +1,12 @@
-### GET request to example server
-GET https://examples.http-client.intellij.net/get
-    ?generated-in=IntelliJ IDEA
+### GET /api/hello
+GET https://wrait-backend.vercel.app/api/hello
+
+###
+
+### POST /api/register
+POST https://wrait-backend.vercel.app/api/register
+Content-Type: application/json
+X-Proxy-Secret: your_proxy_secret_here
+X-Device-Id: your_64_char_hex_device_id_here
 
 ###
