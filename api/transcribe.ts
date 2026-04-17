@@ -2,52 +2,10 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import { json } from '../src/lib/response.js';
 import { prisma } from '../src/lib/prisma.js';
+import { getUTCDayBucket, incrementCallCount } from '../src/lib/callCount.js';
 
 export const config = { api: { bodyParser: false } };
 const DEEPGRAM_TIMEOUT_MS = 55000; // 5s before Vercel timeout
-const TRANSIENT_DB_ERROR_PATTERNS = ['timeout', 'timed out', 'connection', 'econn', 'too many clients'];
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function incrementSuccessfulTranscriptionCount(deviceId: string, date: Date): Promise<void> {
-  const type = CallCountType.TRANSCRIPTION;
-  const retryDelaysMs = [0, 25, 75];
-
-  for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
-    if (retryDelaysMs[attempt] > 0) {
-      await sleep(retryDelaysMs[attempt]);
-    }
-
-    try {
-      await prisma.$executeRaw`
-        INSERT INTO "call_counts" ("device_id", "date", "type", "count")
-        VALUES (${deviceId}, ${date}, ${type}::"CallCountType", 1)
-        ON CONFLICT ("device_id", "date", "type")
-        DO UPDATE SET "count" = "call_counts"."count" + 1
-      `;
-      return;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const normalizedMessage = errorMessage.toLowerCase();
-      const isTransient = TRANSIENT_DB_ERROR_PATTERNS.some((pattern) => normalizedMessage.includes(pattern));
-      const isLastAttempt = attempt === retryDelaysMs.length - 1;
-
-      if (!isTransient || isLastAttempt) {
-        console.error('[transcribe] Failed to store call count:', {
-          error: errorMessage,
-          deviceId,
-          date: date.toISOString(),
-          type,
-          attempt: attempt + 1,
-          transient: isTransient,
-        });
-        return;
-      }
-    }
-  }
-}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
@@ -148,10 +106,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   console.log('[transcribe] Deepgram response', { status: dgRes.status, ok: dgRes.ok });
 
   if (dgRes.ok) {
-    // UTC day bucket keeps counters stable regardless of server/runtime timezone.
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    await incrementSuccessfulTranscriptionCount(deviceId, today);
+    await incrementCallCount(deviceId, getUTCDayBucket(), CallCountType.TRANSCRIPTION, 'transcribe');
   }
 
   return json(res, payload, dgRes.ok ? 200 : 502);

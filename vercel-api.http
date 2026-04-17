@@ -12,10 +12,22 @@ X-Device-Id: your_64_char_hex_device_id_here
 ###
 ### POST /api/transcribe
 POST https://wrait-backend.vercel.app/api/transcribe
-X-Proxy-Secret: your_secret_value_here
-X-Device-Id: your_64_char_hex_device_id_here
+X-Proxy-Secret: SECRET_WRAIT_VALUE
+X-Device-Id: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 Content-Type: audio/wav
 
-< /Users/alexander/projects/wrait/wrait-backend/tests/audio.wav
+< tests/audio.wav
 
 ###
+
+
+### POST /api/cleanup
+POST https://wrait-backend.vercel.app/api/cleanup
+Content-Type: application/json
+X-Proxy-Secret: SECRET_WRAIT_VALUE
+X-Device-Id: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123478
+
+{
+  "transcript": "um, like, you know, the meeting was, uh, really productive, right? basically we covered all the points",
+  "language": "en"
+}
