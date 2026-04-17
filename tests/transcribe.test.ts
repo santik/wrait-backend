@@ -84,6 +84,7 @@ describe('POST /api/transcribe', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -346,6 +347,57 @@ describe('POST /api/transcribe', () => {
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual(deepgramSuccess);
     expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it('stores counter in UTC day bucket', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-17T23:59:59.123Z'));
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => deepgramSuccess,
+    });
+
+    const audio = Buffer.from('fake-audio-bytes');
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      audio,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const dateArg = vi.mocked(prisma.$executeRaw).mock.calls[0][2] as Date;
+    expect(dateArg).toBeInstanceOf(Date);
+    expect(dateArg.toISOString()).toBe('2026-04-17T00:00:00.000Z');
+  });
+
+  it('uses separate counter buckets on different days', async () => {
+    vi.useFakeTimers();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => deepgramSuccess,
+    });
+
+    const makeReq = () =>
+      mockReq(
+        'POST',
+        { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+        Buffer.from('fake-audio-bytes'),
+      );
+
+    vi.setSystemTime(new Date('2026-04-17T10:00:00.000Z'));
+    await handler(makeReq(), mockRes());
+
+    vi.setSystemTime(new Date('2026-04-18T10:00:00.000Z'));
+    await handler(makeReq(), mockRes());
+
+    const firstDateArg = vi.mocked(prisma.$executeRaw).mock.calls[0][2] as Date;
+    const secondDateArg = vi.mocked(prisma.$executeRaw).mock.calls[1][2] as Date;
+
+    expect(firstDateArg.toISOString()).toBe('2026-04-17T00:00:00.000Z');
+    expect(secondDateArg.toISOString()).toBe('2026-04-18T00:00:00.000Z');
+    expect(firstDateArg.toISOString()).not.toBe(secondDateArg.toISOString());
   });
 
   it('rejects invalid Content-Type with 400', async () => {
