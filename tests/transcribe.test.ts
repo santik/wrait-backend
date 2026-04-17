@@ -171,4 +171,63 @@ describe('POST /api/transcribe', () => {
       'https://api.deepgram.com/v1/listen?model=nova-3&language=nl&detect_language=true',
     );
   });
+
+  it('rejects requests exceeding size limit with 413', async () => {
+    const largeAudio = Buffer.alloc(26 * 1024 * 1024); // 26MB
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, largeAudio);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(413);
+    expect(r.body).toEqual({ error: 'Request too large' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when Deepgram returns invalid JSON', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      json: async () => {
+        throw new Error('Invalid JSON');
+      },
+    });
+
+    const audio = Buffer.from('audio');
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, audio);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(r.body).toEqual({ error: 'Invalid response from upstream' });
+  });
+
+  it('returns 502 when fetch throws network error', async () => {
+    mockFetch.mockRejectedValue(new Error('Network error'));
+
+    const audio = Buffer.from('audio');
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, audio);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(r.body).toEqual({ error: 'Failed to reach Deepgram' });
+  });
+
+  it('rejects invalid Content-Type with 400', async () => {
+    const audio = Buffer.from('audio');
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'content-type': 'application/json' }, audio);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Invalid Content-Type' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });

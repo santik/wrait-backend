@@ -6,7 +6,16 @@ GET https://wrait-backend.vercel.app/api/hello
 ### POST /api/register
 POST https://wrait-backend.vercel.app/api/register
 Content-Type: application/json
-X-Proxy-Secret: your_proxy_secret_here
+X-Proxy-Secret: your_secret_value_here
 X-Device-Id: your_64_char_hex_device_id_here
+
+###
+### POST /api/transcribe
+POST https://wrait-backend.vercel.app/api/transcribe
+X-Proxy-Secret: your_secret_value_here
+X-Device-Id: your_64_char_hex_device_id_here
+Content-Type: audio/wav
+
+< /Users/alexander/projects/wrait/wrait-backend/tests/audio.wav
 
 ###

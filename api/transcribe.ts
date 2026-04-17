@@ -9,20 +9,70 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.headers['x-proxy-secret'] !== process.env.PROXY_SECRET)
     return json(res, { error: 'Unauthorized' }, 401);
 
+  const allowedTypes = ['audio/mp4', 'audio/m4a', 'audio/wav', 'audio/webm'];
+  const contentType = (req.headers['content-type'] as string) ?? 'audio/mp4';
+  if (!allowedTypes.includes(contentType)) {
+    console.error('[transcribe] Invalid Content-Type:', contentType);
+    return json(res, { error: 'Invalid Content-Type' }, 400);
+  }
+
+  const MAX_SIZE = 25 * 1024 * 1024; // 25MB
+  let totalSize = 0;
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk as ArrayBuffer));
+
+  for await (const chunk of req) {
+    totalSize += (chunk as ArrayBuffer).byteLength;
+    if (totalSize > MAX_SIZE) {
+      console.error('[transcribe] Request too large:', totalSize);
+      return json(res, { error: 'Request too large' }, 413);
+    }
+    chunks.push(Buffer.from(chunk as ArrayBuffer));
+  }
   const body = Buffer.concat(chunks);
 
-  const { search } = new URL(req.url!, `https://${req.headers.host}`);
-  const dgRes = await fetch(`https://api.deepgram.com/v1/listen${search}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-      'Content-Type': (req.headers['content-type'] as string) ?? 'audio/mp4',
-    },
-    body,
+  console.log('[transcribe] Request received', {
+    contentLength: totalSize,
+    contentType,
+    hasSecret: !!req.headers['x-proxy-secret'],
   });
 
-  const payload: unknown = await dgRes.json();
+  const { search } = new URL(req.url!, `https://${req.headers.host}`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 55000); // 5s before Vercel timeout
+
+  console.log('[transcribe] Forwarding to Deepgram', { search });
+
+  let dgRes: Response;
+  try {
+    dgRes = await fetch(`https://api.deepgram.com/v1/listen${search}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+        'Content-Type': contentType,
+      },
+      body,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    console.error('[transcribe] Fetch error:', error);
+    if (error instanceof Error && error.name === 'AbortError') {
+      return json(res, { error: 'Deepgram request timeout' }, 504);
+    }
+    return json(res, { error: 'Failed to reach Deepgram' }, 502);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await dgRes.json();
+  } catch {
+    console.error('[transcribe] Invalid JSON from Deepgram');
+    return json(res, { error: 'Invalid response from upstream' }, 502);
+  }
+
+  console.log('[transcribe] Deepgram response', { status: dgRes.status, ok: dgRes.ok });
   return json(res, payload, dgRes.ok ? 200 : 502);
 }
