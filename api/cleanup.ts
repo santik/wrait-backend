@@ -1,9 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import { json } from '../src/lib/response.js';
-import { prisma } from '../src/lib/prisma.js';
 import { getUTCDayBucket, incrementCallCount } from '../src/lib/callCount.js';
 import { ALLOWED_LANGUAGES } from '../src/lib/allowedLanguages.js';
+import { ensureDevice } from '../src/lib/device.js';
 
 export const config = { api: { bodyParser: false } };
 
@@ -59,11 +59,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let totalSize = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
-    totalSize += (chunk as Buffer).byteLength;
+    totalSize += (chunk as Buffer).length;
     if (totalSize > MAX_BODY_SIZE) {
       return json(res, { error: 'Request too large' }, 413);
     }
-    chunks.push(Buffer.from(chunk as Buffer));
+    chunks.push(chunk as Buffer);
   }
 
   let body: { transcript?: unknown; language?: unknown };
@@ -83,18 +83,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const language = body.language as string;
 
   try {
-    const device = await prisma.device.findUnique({
-      where: { deviceId },
-      select: { deviceId: true },
-    });
-    if (!device) {
-      await prisma.device.upsert({
-        where: { deviceId },
-        update: {},
-        create: { deviceId },
-      });
-      console.log('[cleanup] Auto-registered device from cleanup endpoint', { deviceId });
-    }
+    await ensureDevice(deviceId, 'cleanup');
   } catch (error) {
     console.error('[cleanup] Failed to validate device:', {
       error: error instanceof Error ? error.message : String(error),

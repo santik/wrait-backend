@@ -180,7 +180,7 @@ describe('POST /api/transcribe', () => {
       create: { deviceId: 'a'.repeat(64) },
     });
     expect(logSpy).toHaveBeenCalledWith(
-      '[transcribe] Auto-registered device from transcribe endpoint',
+      '[transcribe] Auto-registered device',
       { deviceId: 'a'.repeat(64) },
     );
     expect(prisma.$executeRaw).toHaveBeenCalledOnce();

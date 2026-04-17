@@ -327,7 +327,7 @@ describe('POST /api/cleanup', () => {
       create: { deviceId: 'a'.repeat(64) },
     });
     expect(logSpy).toHaveBeenCalledWith(
-      '[cleanup] Auto-registered device from cleanup endpoint',
+      '[cleanup] Auto-registered device',
       { deviceId: 'a'.repeat(64) },
     );
   });
