@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import handler from '../api/transcribe.js';
+import { prisma } from '../src/lib/prisma.js';
+
+vi.mock('../src/lib/prisma.js', () => ({
+  prisma: {
+    device: {
+      findUnique: vi.fn(),
+    },
+    $executeRaw: vi.fn(),
+  },
+}));
 
 const mockFetch = vi.fn();
 
@@ -69,6 +79,8 @@ describe('POST /api/transcribe', () => {
     vi.stubGlobal('fetch', mockFetch);
     process.env.PROXY_SECRET = 'test-secret';
     process.env.DEEPGRAM_API_KEY = 'dg-test-key';
+    vi.mocked(prisma.device.findUnique).mockResolvedValue({ deviceId: 'a'.repeat(64) } as never);
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
   });
 
   afterEach(() => {
@@ -111,6 +123,63 @@ describe('POST /api/transcribe', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('rejects missing device ID with 400', async () => {
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Invalid device ID' });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid device ID format with 400', async () => {
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'abc123' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Invalid device ID' });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('rejects unregistered device with 404', async () => {
+    vi.mocked(prisma.device.findUnique).mockResolvedValue(null);
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(404);
+    expect(r.body).toEqual({ error: 'Device not registered' });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when device lookup fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => { });
+    vi.mocked(prisma.device.findUnique).mockRejectedValue(new Error('DB down'));
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(500);
+    expect(r.body).toEqual({ error: 'Internal server error' });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
   it('proxies audio to Deepgram and returns full response on success', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
@@ -118,7 +187,12 @@ describe('POST /api/transcribe', () => {
     });
 
     const audio = Buffer.from('fake-audio-bytes');
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'content-type': 'audio/mp4' }, audio);
+    const deviceId = 'a'.repeat(64);
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': deviceId, 'content-type': 'audio/mp4' },
+      audio,
+    );
     const res = mockRes();
 
     await handler(req, res);
@@ -133,6 +207,11 @@ describe('POST /api/transcribe', () => {
     expect(url).toContain('model=nova-3');
     expect(init.headers['Authorization']).toBe('Token dg-test-key');
     expect(init.headers['Content-Type']).toBe('audio/mp4');
+    expect(prisma.device.findUnique).toHaveBeenCalledWith({
+      where: { deviceId },
+      select: { deviceId: true },
+    });
+    expect(prisma.$executeRaw).toHaveBeenCalledOnce();
   });
 
   it('returns 502 with Deepgram error body when Deepgram fails', async () => {
@@ -143,7 +222,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const audio = Buffer.from('bad-audio');
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, audio);
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) }, audio);
     const res = mockRes();
 
     await handler(req, res);
@@ -151,6 +230,7 @@ describe('POST /api/transcribe', () => {
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(502);
     expect(r.body).toEqual(dgError);
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('forwards query parameters verbatim to Deepgram', async () => {
@@ -158,7 +238,7 @@ describe('POST /api/transcribe', () => {
 
     const req = mockReq(
       'POST',
-      { 'x-proxy-secret': 'test-secret' },
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
       Buffer.from('audio'),
       '/api/transcribe?model=nova-3&language=nl&detect_language=true',
     );
@@ -174,7 +254,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects requests exceeding size limit with 413', async () => {
     const largeAudio = Buffer.alloc(26 * 1024 * 1024); // 26MB
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, largeAudio);
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) }, largeAudio);
     const res = mockRes();
 
     await handler(req, res);
@@ -194,7 +274,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const audio = Buffer.from('audio');
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, audio);
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) }, audio);
     const res = mockRes();
 
     await handler(req, res);
@@ -202,13 +282,14 @@ describe('POST /api/transcribe', () => {
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(502);
     expect(r.body).toEqual({ error: 'Invalid response from upstream' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('returns 502 when fetch throws network error', async () => {
     mockFetch.mockRejectedValue(new Error('Network error'));
 
     const audio = Buffer.from('audio');
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, audio);
+    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) }, audio);
     const res = mockRes();
 
     await handler(req, res);
@@ -216,11 +297,64 @@ describe('POST /api/transcribe', () => {
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(502);
     expect(r.body).toEqual({ error: 'Failed to reach Deepgram' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('still returns Deepgram success when call count update fails', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => deepgramSuccess,
+    });
+    vi.mocked(prisma.$executeRaw).mockRejectedValue(new Error('DB error'));
+    vi.spyOn(console, 'error').mockImplementation(() => { });
+
+    const audio = Buffer.from('fake-audio-bytes');
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      audio,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual(deepgramSuccess);
+  });
+
+  it('retries transient counter errors and succeeds', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => deepgramSuccess,
+    });
+    vi.mocked(prisma.$executeRaw)
+      .mockRejectedValueOnce(new Error('connection timeout'))
+      .mockResolvedValueOnce(1 as never);
+
+    const audio = Buffer.from('fake-audio-bytes');
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      audio,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual(deepgramSuccess);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
   });
 
   it('rejects invalid Content-Type with 400', async () => {
     const audio = Buffer.from('audio');
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'content-type': 'application/json' }, audio);
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'application/json' },
+      audio,
+    );
     const res = mockRes();
 
     await handler(req, res);

@@ -1,7 +1,53 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { CallCountType } from '@prisma/client';
 import { json } from '../src/lib/response.js';
+import { prisma } from '../src/lib/prisma.js';
 
 export const config = { api: { bodyParser: false } };
+const DEEPGRAM_TIMEOUT_MS = 55000; // 5s before Vercel timeout
+const TRANSIENT_DB_ERROR_PATTERNS = ['timeout', 'timed out', 'connection', 'econn', 'too many clients'];
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function incrementSuccessfulTranscriptionCount(deviceId: string, date: Date): Promise<void> {
+  const type = CallCountType.TRANSCRIPTION;
+  const retryDelaysMs = [0, 25, 75];
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
+    if (retryDelaysMs[attempt] > 0) {
+      await sleep(retryDelaysMs[attempt]);
+    }
+
+    try {
+      await prisma.$executeRaw`
+        INSERT INTO "call_counts" ("device_id", "date", "type", "count")
+        VALUES (${deviceId}, ${date}, ${type}::"CallCountType", 1)
+        ON CONFLICT ("device_id", "date", "type")
+        DO UPDATE SET "count" = "call_counts"."count" + 1
+      `;
+      return;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const normalizedMessage = errorMessage.toLowerCase();
+      const isTransient = TRANSIENT_DB_ERROR_PATTERNS.some((pattern) => normalizedMessage.includes(pattern));
+      const isLastAttempt = attempt === retryDelaysMs.length - 1;
+
+      if (!isTransient || isLastAttempt) {
+        console.error('[transcribe] Failed to store call count:', {
+          error: errorMessage,
+          deviceId,
+          date: date.toISOString(),
+          type,
+          attempt: attempt + 1,
+          transient: isTransient,
+        });
+        return;
+      }
+    }
+  }
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
@@ -9,11 +55,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.headers['x-proxy-secret'] !== process.env.PROXY_SECRET)
     return json(res, { error: 'Unauthorized' }, 401);
 
+  const deviceId = req.headers['x-device-id'];
+  if (!deviceId || typeof deviceId !== 'string' || !/^[a-fA-F0-9]{64}$/.test(deviceId)) {
+    return json(res, { error: 'Invalid device ID' }, 400);
+  }
+
   const allowedTypes = ['audio/mp4', 'audio/m4a', 'audio/wav', 'audio/webm'];
   const contentType = (req.headers['content-type'] as string) ?? 'audio/mp4';
   if (!allowedTypes.includes(contentType)) {
     console.error('[transcribe] Invalid Content-Type:', contentType);
     return json(res, { error: 'Invalid Content-Type' }, 400);
+  }
+
+  try {
+    const device = await prisma.device.findUnique({
+      where: { deviceId },
+      select: { deviceId: true },
+    });
+    if (!device) {
+      return json(res, { error: 'Device not registered' }, 404);
+    }
+  } catch (error) {
+    console.error('[transcribe] Failed to validate device:', {
+      error: error instanceof Error ? error.message : String(error),
+      deviceId,
+    });
+    return json(res, { error: 'Internal server error' }, 500);
   }
 
   const MAX_SIZE = 25 * 1024 * 1024; // 25MB
@@ -39,7 +106,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { search } = new URL(req.url!, `https://${req.headers.host}`);
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 55000); // 5s before Vercel timeout
+  const timeout = setTimeout(() => controller.abort(), DEEPGRAM_TIMEOUT_MS);
 
   console.log('[transcribe] Forwarding to Deepgram', { search });
 
@@ -74,5 +141,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   console.log('[transcribe] Deepgram response', { status: dgRes.status, ok: dgRes.ok });
+
+  if (dgRes.ok) {
+    // UTC day bucket keeps counters stable regardless of server/runtime timezone.
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    await incrementSuccessfulTranscriptionCount(deviceId, today);
+  }
+
   return json(res, payload, dgRes.ok ? 200 : 502);
 }

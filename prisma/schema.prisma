@@ -16,8 +16,13 @@ model Device {
 model CallCount {
   deviceId String   @map("device_id")
   date     DateTime @db.Date
+  type     CallCountType @default(TRANSCRIPTION)
   count    Int      @default(1)
 
-  @@unique([deviceId, date])
+  @@unique([deviceId, date, type])
   @@map("call_counts")
+}
+
+enum CallCountType {
+  TRANSCRIPTION
 }
