@@ -2,6 +2,9 @@
   "devCommand": null,
   "regions": ["cdg1"],
   "functions": {
+    "api/transcribe.ts": {
+      "maxDuration": 60
+    },
     "api/**/*.ts": {
       "maxDuration": 10
     }

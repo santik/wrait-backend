@@ -90,7 +90,7 @@ describe('POST /api/register', () => {
     expect((res2 as unknown as MockResShape).statusCode).toBe(400);
   });
 
-  it('upserts device and returns 200 on success', async () => {
+  it('upserts device and returns 201 on success', async () => {
     const validHex = 'a'.repeat(64);
     const req = mockReq('POST', {
       'x-proxy-secret': 'test-secret',
@@ -112,7 +112,7 @@ describe('POST /api/register', () => {
     });
 
     const r = res as unknown as MockResShape;
-    expect(r.statusCode).toBe(200);
+    expect(r.statusCode).toBe(201);
     expect(r.body).toEqual({ ok: true });
   });
 
@@ -125,7 +125,7 @@ describe('POST /api/register', () => {
     const res = mockRes();
 
     // Prevent console.error from cluttering strictly testing output
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => { });
     vi.mocked(prisma.device.upsert).mockRejectedValue(new Error('DB Error'));
 
     await handler(req, res);
