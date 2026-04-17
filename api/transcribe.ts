@@ -73,7 +73,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       select: { deviceId: true },
     });
     if (!device) {
-      return json(res, { error: 'Device not registered' }, 404);
+      await prisma.device.upsert({
+        where: { deviceId },
+        update: {},
+        create: { deviceId },
+      });
+      console.log('[transcribe] Auto-registered device from transcribe endpoint', { deviceId });
     }
   } catch (error) {
     console.error('[transcribe] Failed to validate device:', {

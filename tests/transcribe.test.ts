@@ -7,6 +7,7 @@ vi.mock('../src/lib/prisma.js', () => ({
   prisma: {
     device: {
       findUnique: vi.fn(),
+      upsert: vi.fn(),
     },
     $executeRaw: vi.fn(),
   },
@@ -80,6 +81,10 @@ describe('POST /api/transcribe', () => {
     process.env.PROXY_SECRET = 'test-secret';
     process.env.DEEPGRAM_API_KEY = 'dg-test-key';
     vi.mocked(prisma.device.findUnique).mockResolvedValue({ deviceId: 'a'.repeat(64) } as never);
+    vi.mocked(prisma.device.upsert).mockResolvedValue({
+      deviceId: 'a'.repeat(64),
+      registeredAt: new Date(),
+    } as never);
     vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
   });
 
@@ -135,6 +140,7 @@ describe('POST /api/transcribe', () => {
     expect(r.body).toEqual({ error: 'Invalid device ID' });
     expect(mockFetch).not.toHaveBeenCalled();
     expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
@@ -149,21 +155,35 @@ describe('POST /api/transcribe', () => {
     expect(r.body).toEqual({ error: 'Invalid device ID' });
     expect(mockFetch).not.toHaveBeenCalled();
     expect(prisma.device.findUnique).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it('rejects unregistered device with 404', async () => {
+  it('auto-registers unregistered device and continues', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => deepgramSuccess,
+    });
     vi.mocked(prisma.device.findUnique).mockResolvedValue(null);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
     const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) });
     const res = mockRes();
 
     await handler(req, res);
 
     const r = res as unknown as MockResShape;
-    expect(r.statusCode).toBe(404);
-    expect(r.body).toEqual({ error: 'Device not registered' });
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual(deepgramSuccess);
+    expect(prisma.device.upsert).toHaveBeenCalledWith({
+      where: { deviceId: 'a'.repeat(64) },
+      update: {},
+      create: { deviceId: 'a'.repeat(64) },
+    });
+    expect(logSpy).toHaveBeenCalledWith(
+      '[transcribe] Auto-registered device from transcribe endpoint',
+      { deviceId: 'a'.repeat(64) },
+    );
+    expect(prisma.$executeRaw).toHaveBeenCalledOnce();
   });
 
   it('returns 500 when device lookup fails', async () => {
@@ -178,6 +198,7 @@ describe('POST /api/transcribe', () => {
     expect(r.statusCode).toBe(500);
     expect(r.body).toEqual({ error: 'Internal server error' });
     expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
