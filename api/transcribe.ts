@@ -92,7 +92,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return json(res, { error: 'Invalid response from upstream' }, 502);
   }
 
-  console.log('[transcribe] Deepgram response', { status: dgRes.status, ok: dgRes.ok });
+  console.log('[transcribe] Deepgram response', { status: dgRes.status, ok: dgRes.ok , payload : payload});
 
   if (dgRes.ok) {
     await incrementCallCount(deviceId, getUTCDayBucket(), CallCountType.TRANSCRIPTION, 'transcribe');
