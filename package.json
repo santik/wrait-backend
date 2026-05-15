@@ -7,28 +7,38 @@
     "node": ">=20"
   },
   "scripts": {
-    "postinstall": "prisma generate",
+    "postinstall": "prisma generate && npm run openapi:generate",
+    "pretype-check": "npm run openapi:generate",
+    "pretest": "npm run openapi:generate",
+    "pretest:watch": "npm run openapi:generate",
     "type-check": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "openapi:lint": "redocly lint openapi/openapi.yaml",
+    "openapi:generate": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.ts",
+    "openapi:check": "npm run openapi:lint && npm run openapi:generate && npm run type-check",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "devDependencies": {
     "@prisma/config": "^7.7.0",
+    "@redocly/cli": "^2.30.4",
     "@types/node": "^20.0.0",
     "@types/pg": "^8.20.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vercel/node": "^5.0.0",
+    "ajv": "^8.20.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^10.0.0",
+    "openapi-typescript": "^7.13.0",
     "prettier": "^3.0.0",
     "prisma": "^7.7.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "vercel": "^50.43.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "yaml": "^2.8.4"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.7.0",
