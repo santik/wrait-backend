@@ -42,7 +42,7 @@ function mockReq(
   method: string,
   headers: Record<string, string>,
   body?: Buffer,
-  url = '/api/transcribe?model=nova-3&punctuate=true&smart_format=true&language=en&detect_language=true',
+  url = '/api/transcribe',
 ) {
   const chunks = body ? [body] : [];
   let idx = 0;
@@ -72,6 +72,11 @@ const deepgramSuccess = {
       },
     ],
   },
+};
+
+const expectedSuccessBody = {
+  transcript: 'hello world',
+  detected_language: 'en',
 };
 
 describe('POST /api/transcribe', () => {
@@ -173,7 +178,7 @@ describe('POST /api/transcribe', () => {
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
-    expect(r.body).toEqual(deepgramSuccess);
+    expect(r.body).toEqual(expectedSuccessBody);
     expect(prisma.device.upsert).toHaveBeenCalledWith({
       where: { deviceId: 'a'.repeat(64) },
       update: {},
@@ -221,12 +226,17 @@ describe('POST /api/transcribe', () => {
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
-    expect(r.body).toEqual(deepgramSuccess);
+    expect(r.body).toEqual(expectedSuccessBody);
 
     expect(mockFetch).toHaveBeenCalledOnce();
     const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
     expect(url).toContain('https://api.deepgram.com/v1/listen');
-    expect(url).toContain('model=nova-3');
+    expect(url).toContain('model=nova-3-general');
+    expect(url).toContain('detect_language=true');
+    expect(url).toContain('utterances=false');
+    expect(url).toContain('filler_words=true');
+    expect(url).toContain('punctuate=true');
+    expect(url).toContain('smart_format=true');
     expect(init.headers['Authorization']).toBe('Token dg-test-key');
     expect(init.headers['Content-Type']).toBe('audio/mp4');
     expect(prisma.device.findUnique).toHaveBeenCalledWith({
@@ -255,14 +265,14 @@ describe('POST /api/transcribe', () => {
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it('forwards query parameters verbatim to Deepgram', async () => {
+  it('ignores incoming query parameters and uses backend defaults', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
 
     const req = mockReq(
       'POST',
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
       Buffer.from('audio'),
-      '/api/transcribe?model=nova-3&language=nl&detect_language=true',
+      '/api/transcribe?model=custom&language=nl&detect_language=false&utterances=true&filler_words=false&punctuate=false&smart_format=false',
     );
     const res = mockRes();
 
@@ -270,8 +280,46 @@ describe('POST /api/transcribe', () => {
 
     const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      'https://api.deepgram.com/v1/listen?model=nova-3&language=nl&detect_language=true',
+      'https://api.deepgram.com/v1/listen?model=nova-3-general&detect_language=true&utterances=false&filler_words=true&punctuate=true&smart_format=true',
     );
+  });
+
+  it('uses backend default query parameters when only a file is provided', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
+
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      Buffer.from('audio'),
+      '/api/transcribe',
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      'https://api.deepgram.com/v1/listen?model=nova-3-general&detect_language=true&utterances=false&filler_words=true&punctuate=true&smart_format=true',
+    );
+    expect((res as unknown as MockResShape).statusCode).toBe(200);
+    expect((res as unknown as MockResShape).body).toEqual(expectedSuccessBody);
+  });
+
+  it('defaults to audio/mp4 when Content-Type is omitted', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
+
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      Buffer.from('audio'),
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
+    expect(init.headers['Content-Type']).toBe('audio/mp4');
+    expect((res as unknown as MockResShape).body).toEqual(expectedSuccessBody);
   });
 
   it('rejects requests exceeding size limit with 413', async () => {
@@ -342,7 +390,7 @@ describe('POST /api/transcribe', () => {
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
-    expect(r.body).toEqual(deepgramSuccess);
+    expect(r.body).toEqual(expectedSuccessBody);
   });
 
   it('retries transient counter errors and succeeds', async () => {
@@ -366,8 +414,52 @@ describe('POST /api/transcribe', () => {
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
-    expect(r.body).toEqual(deepgramSuccess);
+    expect(r.body).toEqual(expectedSuccessBody);
     expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns 502 when Deepgram success payload is missing transcript fields', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: { channels: [{ alternatives: [] }] } }),
+    });
+
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      Buffer.from('audio'),
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(r.body).toEqual({ error: 'Invalid response from upstream' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when Deepgram success payload is missing detected language', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: { channels: [{ alternatives: [{ transcript: 'hello world' }] }] },
+      }),
+    });
+
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      Buffer.from('audio'),
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(r.body).toEqual({ error: 'Invalid response from upstream' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('stores counter in UTC day bucket', async () => {

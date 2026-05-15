@@ -102,7 +102,7 @@ OPENAI_API_KEY=sk-xxxxxxxxx
 npm install
 ```
 
-`postinstall` runs `prisma generate`, so the Prisma client is generated automatically.
+`postinstall` runs Prisma client generation and OpenAPI type generation automatically.
 
 ### 2. Apply database migrations
 
@@ -124,9 +124,37 @@ Vercel will expose the routes under `/api/*`.
 npm run type-check
 npm run lint
 npm run format
+npm run openapi:lint
+npm run openapi:generate
+npm run openapi:check
 npm test
 npm run test:watch
 ```
+
+## OpenAPI Workflow
+
+The authored API contract lives in:
+
+- `openapi/openapi.yaml`
+
+Generated TypeScript contract types are written to:
+
+- `src/generated/openapi.ts`
+
+That generated file is intentionally ignored. Regenerate it instead of editing or committing it.
+
+### Regeneration Commands
+
+```bash
+npm run openapi:generate
+npm run openapi:check
+```
+
+Notes:
+
+- `npm run openapi:generate` refreshes `src/generated/openapi.ts`
+- `npm run openapi:check` lints the spec, regenerates types, and runs `tsc`
+- `npm install`, `npm test`, and `npm run type-check` also regenerate the OpenAPI types automatically
 
 ## API Overview
 
@@ -181,7 +209,7 @@ Status: `201 Created`
 
 ### `POST /api/transcribe`
 
-Accepts raw audio, forwards it to Deepgram, and returns Deepgram's JSON response body.
+Accepts raw audio, sends it to Deepgram with backend-owned defaults, and returns a simplified response.
 
 #### Headers
 
@@ -191,15 +219,16 @@ X-Device-Id: <64-char hex>
 Content-Type: audio/mp4 | audio/m4a | audio/wav | audio/webm
 ```
 
-#### Query parameters
+#### Upstream defaults
 
-The route forwards the incoming query string to Deepgram verbatim. Example parameters from tests:
+The backend does not accept client query parameters for this endpoint. It always calls Deepgram with:
 
-- `model=nova-3`
+- `model=nova-3-general`
+- `detect_language=true`
+- `utterances=false`
+- `filler_words=true`
 - `punctuate=true`
 - `smart_format=true`
-- `language=en`
-- `detect_language=true`
 
 #### Constraints
 
@@ -210,7 +239,15 @@ The route forwards the incoming query string to Deepgram verbatim. Example param
 
 #### Success behavior
 
-- Returns `200` with Deepgram's JSON payload
+- Returns `200` with:
+
+```json
+{
+  "transcript": "hello world",
+  "detected_language": "en"
+}
+```
+
 - Increments the `TRANSCRIPTION` call counter for the current UTC day
 
 #### Error responses
@@ -377,6 +414,65 @@ The repository is configured for Vercel.
   - `Permissions-Policy`
   - `Content-Security-Policy: default-src 'none'`
 
+## Deploying To Vercel
+
+### 1. Create the Vercel project
+
+Use either the Vercel dashboard or the CLI:
+
+```bash
+npx vercel
+```
+
+For a production deployment:
+
+```bash
+npx vercel --prod
+```
+
+### 2. Configure environment variables
+
+Set these in the Vercel project settings:
+
+- `DATABASE_URL`
+- `DATABASE_URL_UNPOOLED`
+- `NODE_ENV`
+- `PROXY_SECRET`
+- `DEEPGRAM_API_KEY`
+- `OPENAI_API_KEY`
+
+Recommended production values:
+
+- `NODE_ENV=production`
+- `PROXY_SECRET` should be a long random secret
+
+### 3. Build behavior
+
+Vercel runs `npm install`, which triggers `postinstall`. In this project that means:
+
+- Prisma client generation
+- OpenAPI type generation
+
+Because `src/generated/openapi.ts` is ignored, successful installs depend on that generation step running.
+
+### 4. Apply database migrations
+
+Run production migrations from a trusted environment with production credentials:
+
+```bash
+npx prisma migrate deploy
+```
+
+Do this before or alongside the first production rollout so the API code and database schema stay aligned.
+
+### 5. Verify the deployment
+
+After deployment:
+
+- call `GET /api/hello` to verify the project is live
+- exercise `POST /api/register`, `POST /api/transcribe`, and `POST /api/cleanup` with the required headers
+- confirm the Vercel environment variables match the intended environment
+
 ## Testing
 
 Test coverage focuses on route behavior and counter logic:
@@ -424,7 +520,7 @@ curl -X POST https://your-deployment.vercel.app/api/register \
 ### Transcribe
 
 ```bash
-curl -X POST "https://your-deployment.vercel.app/api/transcribe?model=nova-3&punctuate=true&smart_format=true&language=en&detect_language=true" \
+curl -X POST "https://your-deployment.vercel.app/api/transcribe" \
   -H "X-Proxy-Secret: $PROXY_SECRET" \
   -H "X-Device-Id: $DEVICE_ID" \
   -H "Content-Type: audio/wav" \
@@ -448,6 +544,7 @@ curl -X POST https://your-deployment.vercel.app/api/cleanup \
 
 - `GET /api/hello` is public; all other routes require the proxy secret.
 - `register` requires explicit registration, but `transcribe` and `cleanup` also auto-register missing devices.
-- `transcribe` returns the upstream Deepgram body directly on success and on non-OK upstream responses.
+- `transcribe` returns a backend-shaped success response with `transcript` and `detected_language`.
+- `transcribe` ignores client query parameters and uses backend-owned Deepgram defaults.
 - `cleanup` returns a backend-shaped response with `cleanedText` and `wasTruncated`.
 - The shared `json()` helper always sets `Cache-Control`, defaulting to `no-store`.
