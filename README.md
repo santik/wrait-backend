@@ -5,7 +5,7 @@
 ## What It Does
 
 - Registers client devices by hashed device ID.
-- Accepts raw audio uploads and forwards them to Deepgram.
+- Accepts multipart audio uploads and forwards the extracted file to Deepgram.
 - Accepts raw transcripts and cleans them up for diary-quality text.
 - Tracks successful transcription and cleanup calls per device, per UTC day.
 - Protects all non-public routes with a shared proxy secret.
@@ -209,15 +209,26 @@ Status: `201 Created`
 
 ### `POST /api/transcribe`
 
-Accepts raw audio, sends it to Deepgram with backend-owned defaults, and returns a simplified response.
+Accepts a multipart upload with an `audio` file part, sends the extracted file to Deepgram with backend-owned defaults, and returns a simplified response.
 
 #### Headers
 
 ```http
 X-Proxy-Secret: <secret>
 X-Device-Id: <64-char hex>
-Content-Type: audio/mp4 | audio/m4a | audio/wav | audio/webm
+Content-Type: multipart/form-data
 ```
+
+The multipart body must include:
+
+- `audio` file part
+
+Supported `audio` file content types:
+
+- `audio/mp4`
+- `audio/m4a`
+- `audio/wav`
+- `audio/webm`
 
 #### Upstream defaults
 
@@ -234,7 +245,7 @@ The backend does not accept client query parameters for this endpoint. It always
 
 - Max request size: `25 MB`
 - Upstream timeout: `55 seconds`
-- Body parser disabled so raw audio can be streamed
+- Body parser disabled so multipart uploads can be parsed manually
 - Unknown devices are auto-registered before the upstream call
 
 #### Success behavior
@@ -523,8 +534,7 @@ curl -X POST https://your-deployment.vercel.app/api/register \
 curl -X POST "https://your-deployment.vercel.app/api/transcribe" \
   -H "X-Proxy-Secret: $PROXY_SECRET" \
   -H "X-Device-Id: $DEVICE_ID" \
-  -H "Content-Type: audio/wav" \
-  --data-binary @tests/audio.wav
+  -F "audio=@tests/audio.wav;type=audio/wav"
 ```
 
 ### Cleanup

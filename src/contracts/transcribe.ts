@@ -1,10 +1,11 @@
+import { once } from 'node:events';
 import type { VercelRequest } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
+import busboy from 'busboy';
 import { ensureDevice } from '../lib/device.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
 import {
   errorResponse,
-  readRequestBody,
   requireDeviceId,
   requirePostMethod,
   requireProxySecret,
@@ -17,6 +18,9 @@ import type {
 
 const DEEPGRAM_TIMEOUT_MS = 55000;
 const MAX_REQUEST_SIZE = 25 * 1024 * 1024;
+const MAX_MULTIPART_PARTS = 10;
+const BOUNDARY_MAX_LENGTH = 70;
+const BOUNDARY_PATTERN = /^[0-9A-Za-z'()+_,\-./:=?]+$/;
 
 export const ALLOWED_AUDIO_CONTENT_TYPES = [
   'audio/mp4',
@@ -36,15 +40,189 @@ const DEFAULT_TRANSCRIBE_QUERY = {
   smart_format: true,
 } as const;
 
-function getSupportedContentType(req: VercelRequest): SupportedAudioContentType | null {
+type MultipartAudioUpload = {
+  body: Buffer;
+  contentType: SupportedAudioContentType;
+  requestSize: number;
+};
+
+function getMultipartContentType(req: VercelRequest): { contentType: string; boundary: string } | null {
   const contentType = req.headers['content-type'];
   if (typeof contentType !== 'string') {
-    return 'audio/mp4';
+    return null;
   }
 
+  const [mediaType, ...rawParameters] = contentType.split(';');
+  if (mediaType.trim().toLowerCase() !== 'multipart/form-data') {
+    return null;
+  }
+
+  let boundary: string | null = null;
+  for (const rawParameter of rawParameters) {
+    const [rawName, ...rawValueParts] = rawParameter.split('=');
+    if (rawValueParts.length === 0 || rawName.trim().toLowerCase() !== 'boundary') {
+      continue;
+    }
+
+    let rawValue = rawValueParts.join('=').trim();
+    if (rawValue.startsWith('"') && rawValue.endsWith('"')) {
+      rawValue = rawValue.slice(1, -1);
+    }
+    boundary = rawValue;
+    break;
+  }
+
+  if (!boundary || boundary.length > BOUNDARY_MAX_LENGTH || !BOUNDARY_PATTERN.test(boundary)) {
+    return null;
+  }
+
+  return { contentType, boundary };
+}
+
+function getSupportedAudioContentType(contentType: string): SupportedAudioContentType | null {
   return ALLOWED_AUDIO_CONTENT_TYPES.includes(contentType as SupportedAudioContentType)
     ? (contentType as SupportedAudioContentType)
     : null;
+}
+
+async function parseMultipartAudioUpload(
+  req: VercelRequest,
+  requestContentType: string,
+): Promise<MultipartAudioUpload | OperationResult<never>> {
+  const parser = busboy({
+    headers: {
+      ...req.headers,
+      'content-type': requestContentType,
+    },
+    limits: {
+      fields: 0,
+      files: 2,
+      parts: MAX_MULTIPART_PARTS,
+      fileSize: MAX_REQUEST_SIZE,
+    },
+  });
+
+  const audioChunks: Buffer[] = [];
+  let audioContentType: SupportedAudioContentType | null = null;
+  let audioFileCount = 0;
+  let audioSize = 0;
+  let requestSize = 0;
+  let aborted = false;
+  let pendingError: OperationResult<never> | null = null;
+
+  const setError = (result: OperationResult<never>) => {
+    if (!pendingError) {
+      pendingError = result;
+    }
+  };
+
+  parser.on('field', () => {
+    setError({ status: 400, body: errorResponse('Invalid multipart form data') });
+  });
+
+  parser.on('partsLimit', () => {
+    setError({ status: 400, body: errorResponse('Invalid multipart form data') });
+  });
+
+  parser.on('filesLimit', () => {
+    setError({ status: 400, body: errorResponse('Invalid multipart form data') });
+  });
+
+  parser.on('fieldsLimit', () => {
+    setError({ status: 400, body: errorResponse('Invalid multipart form data') });
+  });
+
+  parser.on('file', (name, stream, info) => {
+    if (name !== 'audio') {
+      setError({ status: 400, body: errorResponse('Invalid multipart form data') });
+      stream.resume();
+      return;
+    }
+
+    audioFileCount += 1;
+    if (audioFileCount > 1) {
+      setError({ status: 400, body: errorResponse('Multiple audio files not supported') });
+      stream.resume();
+      return;
+    }
+
+    const contentType = getSupportedAudioContentType(info.mimeType);
+    if (!contentType) {
+      console.error('[transcribe] Invalid audio Content-Type:', info.mimeType || '(missing)');
+      setError({ status: 400, body: errorResponse('Invalid audio Content-Type') });
+      stream.resume();
+      return;
+    }
+
+    audioContentType = contentType;
+
+    stream.on('limit', () => {
+      setError({ status: 413, body: errorResponse('Request too large') });
+    });
+
+    stream.on('data', (chunk: Buffer) => {
+      audioSize += chunk.length;
+      audioChunks.push(Buffer.from(chunk));
+    });
+  });
+
+  return await new Promise<MultipartAudioUpload | OperationResult<never>>(async (resolve) => {
+    let settled = false;
+
+    const finish = (result: MultipartAudioUpload | OperationResult<never>) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    parser.on('error', (error) => {
+      console.error('[transcribe] Invalid multipart body:', error);
+      finish(pendingError ?? { status: 400, body: errorResponse('Invalid multipart form data') });
+    });
+
+    parser.on('close', () => {
+      if (pendingError) {
+        finish(pendingError);
+        return;
+      }
+
+      if (audioFileCount === 0 || !audioContentType || audioSize === 0) {
+        finish({ status: 400, body: errorResponse('Missing audio file') });
+        return;
+      }
+
+      finish({
+        body: Buffer.concat(audioChunks),
+        contentType: audioContentType,
+        requestSize,
+      });
+    });
+
+    try {
+      for await (const chunk of req) {
+        const bufferChunk = chunk as Buffer;
+        requestSize += bufferChunk.length;
+
+        if (requestSize > MAX_REQUEST_SIZE) {
+          aborted = true;
+          setError({ status: 413, body: errorResponse('Request too large') });
+          parser.destroy();
+          break;
+        }
+
+        if (!parser.write(bufferChunk)) {
+          await once(parser, 'drain');
+        }
+      }
+
+      if (!aborted) {
+        parser.end();
+      }
+    } catch (error) {
+      console.error('[transcribe] Invalid multipart body:', error);
+      finish({ status: 400, body: errorResponse('Invalid multipart form data') });
+    }
+  });
 }
 
 function buildDeepgramSearch(): string {
@@ -93,8 +271,8 @@ export async function handleTranscribe(
   const device = requireDeviceId(req);
   if ('status' in device) return device;
 
-  const contentType = getSupportedContentType(req);
-  if (!contentType) {
+  const requestContentType = getMultipartContentType(req);
+  if (!requestContentType) {
     console.error('[transcribe] Invalid Content-Type:', req.headers['content-type']);
     return { status: 400, body: errorResponse('Invalid Content-Type') };
   }
@@ -109,12 +287,13 @@ export async function handleTranscribe(
     return { status: 500, body: errorResponse('Internal server error') };
   }
 
-  const requestBody = await readRequestBody(req, MAX_REQUEST_SIZE);
-  if ('status' in requestBody) return requestBody;
+  const audioUpload = await parseMultipartAudioUpload(req, requestContentType.contentType);
+  if ('status' in audioUpload) return audioUpload;
 
   console.log('[transcribe] Request received', {
-    contentLength: requestBody.totalSize,
-    contentType,
+    contentLength: audioUpload.requestSize,
+    requestContentType: requestContentType.contentType,
+    audioContentType: audioUpload.contentType,
     hasSecret: !!req.headers['x-proxy-secret'],
   });
 
@@ -131,9 +310,9 @@ export async function handleTranscribe(
       method: 'POST',
       headers: {
         Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-        'Content-Type': contentType,
+        'Content-Type': audioUpload.contentType,
       },
-      body: new Uint8Array(requestBody.body),
+      body: new Uint8Array(audioUpload.body),
       signal: controller.signal,
     });
   } catch (error) {
