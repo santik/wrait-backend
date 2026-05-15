@@ -37,6 +37,13 @@ type MockResShape = {
   headers: Record<string, string>;
 };
 
+type MultipartPart = {
+  name: string;
+  body: Buffer | string;
+  filename?: string;
+  contentType?: string;
+};
+
 type OpenApiSpec = {
   components: {
     schemas: Record<string, unknown>;
@@ -97,6 +104,48 @@ function mockTranscribeReq(
       };
     },
   } as unknown as VercelRequest;
+}
+
+function buildMultipartBody(parts: MultipartPart[], boundary = 'test-boundary'): Buffer {
+  const chunks: Buffer[] = [];
+
+  for (const part of parts) {
+    chunks.push(Buffer.from(`--${boundary}\r\n`));
+
+    let disposition = `Content-Disposition: form-data; name="${part.name}"`;
+    if (part.filename) {
+      disposition += `; filename="${part.filename}"`;
+    }
+    chunks.push(Buffer.from(`${disposition}\r\n`));
+
+    if (part.contentType) {
+      chunks.push(Buffer.from(`Content-Type: ${part.contentType}\r\n`));
+    }
+
+    chunks.push(Buffer.from('\r\n'));
+    chunks.push(typeof part.body === 'string' ? Buffer.from(part.body) : part.body);
+    chunks.push(Buffer.from('\r\n'));
+  }
+
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return Buffer.concat(chunks);
+}
+
+function mockMultipartTranscribeReq(
+  headers: Record<string, string>,
+  parts: MultipartPart[],
+  url = '/api/transcribe',
+  boundary = 'test-boundary',
+) {
+  return mockTranscribeReq(
+    'POST',
+    {
+      ...headers,
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+    },
+    buildMultipartBody(parts, boundary),
+    url,
+  );
 }
 
 function mockCleanupReq(method: string, headers: Record<string, string>, body?: unknown) {
@@ -254,10 +303,9 @@ describe('OpenAPI contract', () => {
       }),
     });
 
-    const req = mockTranscribeReq(
-      'POST',
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
-      Buffer.from('audio'),
+    const req = mockMultipartTranscribeReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [{ name: 'audio', filename: 'recording.m4a', contentType: 'audio/m4a', body: Buffer.from('audio') }],
     );
     const res = mockRes();
 
@@ -273,10 +321,9 @@ describe('OpenAPI contract', () => {
       json: async () => ({ error: 'Bad Request', reason: 'invalid audio' }),
     });
 
-    const req = mockTranscribeReq(
-      'POST',
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
-      Buffer.from('audio'),
+    const req = mockMultipartTranscribeReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [{ name: 'audio', filename: 'recording.m4a', contentType: 'audio/m4a', body: Buffer.from('audio') }],
     );
     const res = mockRes();
 
