@@ -2,7 +2,8 @@ import type { VercelRequest } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import { ALLOWED_LANGUAGES } from '../lib/allowedLanguages.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
-import { ensureDevice } from '../lib/device.js';
+import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
+import { verifyDailyRecordQuota } from '../lib/quota.js';
 import {
   errorResponse,
   readRequestBody,
@@ -11,7 +12,7 @@ import {
   requireProxySecret,
 } from './http.js';
 import type { OperationResult } from './http.js';
-import type { CleanupRequestBody, CleanupResponseBody } from './openapi.js';
+import type { CleanupErrorResponse, CleanupRequestBody, CleanupResponseBody } from './openapi.js';
 
 const MAX_BODY_SIZE = 1 * 1024 * 1024;
 const OPENAI_TIMEOUT_MS = 25000;
@@ -78,7 +79,7 @@ function isCleanupRequestBody(body: unknown): body is CleanupRequestBody {
 
 export async function handleCleanup(
   req: VercelRequest,
-): Promise<OperationResult<CleanupResponseBody>> {
+): Promise<OperationResult<CleanupResponseBody, CleanupErrorResponse>> {
   const methodError = requirePostMethod(req);
   if (methodError) return methodError;
 
@@ -116,14 +117,25 @@ export async function handleCleanup(
     return { status: 400, body: errorResponse('Missing or invalid language') };
   }
 
+  let ensuredDevice: EnsuredDevice;
   try {
-    await ensureDevice(device.deviceId, 'cleanup');
+    ensuredDevice = await ensureDevice(device.deviceId);
   } catch (error) {
     console.error('[cleanup] Failed to validate device:', {
       error: error instanceof Error ? error.message : String(error),
       deviceId: device.deviceId,
     });
     return { status: 500, body: errorResponse('Internal server error') };
+  }
+
+  const quotaCheck = await verifyDailyRecordQuota(
+    ensuredDevice.deviceId,
+    ensuredDevice.dailyRecordLimit,
+    CallCountType.CLEANUP,
+    'cleanup',
+  );
+  if (!quotaCheck.allowed) {
+    return { status: quotaCheck.status, body: quotaCheck.body };
   }
 
   console.log('[cleanup] Request received', {
@@ -155,8 +167,10 @@ export async function handleCleanup(
       signal: controller.signal,
     });
   } catch (error) {
-    clearTimeout(timeout);
-    console.error('[cleanup] Fetch error:', error);
+    console.error('[cleanup] OpenAI fetch error:', {
+      error: error instanceof Error ? error.message : String(error),
+      deviceId: ensuredDevice.deviceId,
+    });
     if (error instanceof Error && error.name === 'AbortError') {
       return { status: 504, body: errorResponse('OpenAI request timeout') };
     }
@@ -166,7 +180,10 @@ export async function handleCleanup(
   }
 
   if (!oaiRes.ok) {
-    console.error('[cleanup] OpenAI error:', { status: oaiRes.status });
+    console.error('[cleanup] OpenAI upstream returned non-OK status:', {
+      status: oaiRes.status,
+      deviceId: ensuredDevice.deviceId,
+    });
     return { status: 502, body: errorResponse('upstream_error') };
   }
 
@@ -174,7 +191,9 @@ export async function handleCleanup(
   try {
     payload = await oaiRes.json();
   } catch {
-    console.error('[cleanup] Invalid JSON from OpenAI');
+    console.error('[cleanup] OpenAI returned invalid JSON:', {
+      deviceId: ensuredDevice.deviceId,
+    });
     return { status: 502, body: errorResponse('upstream_error') };
   }
 
@@ -182,7 +201,9 @@ export async function handleCleanup(
     ?.choices?.[0]?.message?.content;
 
   if (!cleanedText || typeof cleanedText !== 'string') {
-    console.error('[cleanup] Unexpected OpenAI response shape');
+    console.error('[cleanup] OpenAI returned unexpected response shape:', {
+      deviceId: ensuredDevice.deviceId,
+    });
     return { status: 502, body: errorResponse('upstream_error') };
   }
 

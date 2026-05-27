@@ -101,6 +101,7 @@ describe('POST /api/register', () => {
     vi.mocked(prisma.device.upsert).mockResolvedValue({
       deviceId: validHex,
       registeredAt: new Date(),
+      dailyRecordLimit: null,
     });
 
     await handler(req, res);

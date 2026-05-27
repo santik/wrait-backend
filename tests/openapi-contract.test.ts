@@ -15,6 +15,9 @@ vi.mock('../src/lib/prisma.js', () => ({
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    callCount: {
+      findUnique: vi.fn(),
+    },
     $executeRaw: vi.fn(),
   },
 }));
@@ -24,6 +27,7 @@ const require = createRequire(import.meta.url);
 const Ajv = (require('ajv').default ?? require('ajv')) as new (options?: {
   allErrors?: boolean;
   strict?: boolean;
+  validateFormats?: boolean;
 }) => {
   compile(schema: Record<string, unknown>): {
     (payload: unknown): boolean;
@@ -226,7 +230,7 @@ function getResponseSchema(
 }
 
 function expectToMatchSchema(schema: Record<string, unknown>, payload: unknown): void {
-  const ajv = new Ajv({ allErrors: true, strict: false });
+  const ajv = new Ajv({ allErrors: true, strict: false, validateFormats: false });
   const validate = ajv.compile(schema);
   const valid = validate(payload);
 
@@ -242,11 +246,12 @@ describe('OpenAPI contract', () => {
     process.env.PROXY_SECRET = 'test-secret';
     process.env.DEEPGRAM_API_KEY = 'dg-test-key';
     process.env.OPENAI_API_KEY = 'sk-test-key';
-    vi.mocked(prisma.device.findUnique).mockResolvedValue({ deviceId: 'a'.repeat(64) } as never);
     vi.mocked(prisma.device.upsert).mockResolvedValue({
       deviceId: 'a'.repeat(64),
       registeredAt: new Date(),
+      dailyRecordLimit: null,
     } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
   });
 
@@ -333,6 +338,23 @@ describe('OpenAPI contract', () => {
     expectToMatchSchema(getResponseSchema(spec, '/api/transcribe', 'post', 502), (res as unknown as MockResShape).body);
   });
 
+  it('transcribe quota-exceeded error matches the OpenAPI 429 response schema', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-21T10:00:00.000Z'));
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 6 } as never);
+
+    const req = mockMultipartTranscribeReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [{ name: 'audio', filename: 'recording.m4a', contentType: 'audio/m4a', body: Buffer.from('audio') }],
+    );
+    const res = mockRes();
+
+    await transcribeHandler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(429);
+    expectToMatchSchema(getResponseSchema(spec, '/api/transcribe', 'post', 429), (res as unknown as MockResShape).body);
+  });
+
   it('cleanup success matches the OpenAPI 200 response schema', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
@@ -372,5 +394,27 @@ describe('OpenAPI contract', () => {
 
     expect((res as unknown as MockResShape).statusCode).toBe(400);
     expectToMatchSchema(getResponseSchema(spec, '/api/cleanup', 'post', 400), (res as unknown as MockResShape).body);
+  });
+
+  it('cleanup quota-exceeded error matches the OpenAPI 429 response schema', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-21T10:00:00.000Z'));
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 3 } as never);
+
+    const req = mockCleanupReq(
+      'POST',
+      {
+        'x-proxy-secret': 'test-secret',
+        'x-device-id': 'a'.repeat(64),
+        'content-type': 'application/json',
+      },
+      { transcript: 'um hello world so like', language: 'en-US' },
+    );
+    const res = mockRes();
+
+    await cleanupHandler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(429);
+    expectToMatchSchema(getResponseSchema(spec, '/api/cleanup', 'post', 429), (res as unknown as MockResShape).body);
   });
 });

@@ -2,8 +2,9 @@ import { once } from 'node:events';
 import type { VercelRequest } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import busboy from 'busboy';
-import { ensureDevice } from '../lib/device.js';
+import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
+import { verifyDailyRecordQuota } from '../lib/quota.js';
 import {
   errorResponse,
   requireDeviceId,
@@ -12,6 +13,7 @@ import {
 } from './http.js';
 import type { OperationResult } from './http.js';
 import type {
+  TranscribeErrorResponse,
   TranscribeResponseBody,
   UpstreamErrorResponse,
 } from './openapi.js';
@@ -261,7 +263,7 @@ function getDeepgramChannel(payload: unknown): { transcript: string; detectedLan
 
 export async function handleTranscribe(
   req: VercelRequest,
-): Promise<OperationResult<TranscribeResponseBody, UpstreamErrorResponse>> {
+): Promise<OperationResult<TranscribeResponseBody, TranscribeErrorResponse>> {
   const methodError = requirePostMethod(req);
   if (methodError) return methodError;
 
@@ -277,14 +279,25 @@ export async function handleTranscribe(
     return { status: 400, body: errorResponse('Invalid Content-Type') };
   }
 
+  let ensuredDevice: EnsuredDevice;
   try {
-    await ensureDevice(device.deviceId, 'transcribe');
+    ensuredDevice = await ensureDevice(device.deviceId);
   } catch (error) {
     console.error('[transcribe] Failed to validate device:', {
       error: error instanceof Error ? error.message : String(error),
       deviceId: device.deviceId,
     });
     return { status: 500, body: errorResponse('Internal server error') };
+  }
+
+  const quotaCheck = await verifyDailyRecordQuota(
+    ensuredDevice.deviceId,
+    ensuredDevice.dailyRecordLimit,
+    CallCountType.TRANSCRIPTION,
+    'transcribe',
+  );
+  if (!quotaCheck.allowed) {
+    return { status: quotaCheck.status, body: quotaCheck.body };
   }
 
   const audioUpload = await parseMultipartAudioUpload(req, requestContentType.contentType);
@@ -316,7 +329,6 @@ export async function handleTranscribe(
       signal: controller.signal,
     });
   } catch (error) {
-    clearTimeout(timeout);
     console.error('[transcribe] Fetch error:', error);
     if (error instanceof Error && error.name === 'AbortError') {
       return { status: 504, body: errorResponse('Deepgram request timeout') };

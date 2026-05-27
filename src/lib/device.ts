@@ -1,16 +1,18 @@
 import { prisma } from './prisma.js';
 
-export async function ensureDevice(deviceId: string, label: string): Promise<void> {
-  const device = await prisma.device.findUnique({
+export type EnsuredDevice = {
+  deviceId: string;
+  dailyRecordLimit: number | null;
+};
+
+export async function ensureDevice(deviceId: string): Promise<EnsuredDevice> {
+  return prisma.device.upsert({
     where: { deviceId },
-    select: { deviceId: true },
+    update: {},
+    create: { deviceId },
+    select: {
+      deviceId: true,
+      dailyRecordLimit: true,
+    },
   });
-  if (!device) {
-    await prisma.device.upsert({
-      where: { deviceId },
-      update: {},
-      create: { deviceId },
-    });
-    console.log(`[${label}] Auto-registered device`, { deviceId });
-  }
 }

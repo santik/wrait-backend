@@ -6,8 +6,10 @@ import { prisma } from '../src/lib/prisma.js';
 vi.mock('../src/lib/prisma.js', () => ({
   prisma: {
     device: {
-      findUnique: vi.fn(),
       upsert: vi.fn(),
+    },
+    callCount: {
+      findUnique: vi.fn(),
     },
     $executeRaw: vi.fn(),
   },
@@ -143,11 +145,12 @@ describe('POST /api/transcribe', () => {
     vi.stubGlobal('fetch', mockFetch);
     process.env.PROXY_SECRET = 'test-secret';
     process.env.DEEPGRAM_API_KEY = 'dg-test-key';
-    vi.mocked(prisma.device.findUnique).mockResolvedValue({ deviceId: 'a'.repeat(64) } as never);
     vi.mocked(prisma.device.upsert).mockResolvedValue({
       deviceId: 'a'.repeat(64),
       registeredAt: new Date(),
+      dailyRecordLimit: null,
     } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
   });
 
@@ -202,7 +205,6 @@ describe('POST /api/transcribe', () => {
     expect(r.statusCode).toBe(400);
     expect(r.body).toEqual({ error: 'Invalid device ID' });
     expect(mockFetch).not.toHaveBeenCalled();
-    expect(prisma.device.findUnique).not.toHaveBeenCalled();
     expect(prisma.device.upsert).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
@@ -217,18 +219,15 @@ describe('POST /api/transcribe', () => {
     expect(r.statusCode).toBe(400);
     expect(r.body).toEqual({ error: 'Invalid device ID' });
     expect(mockFetch).not.toHaveBeenCalled();
-    expect(prisma.device.findUnique).not.toHaveBeenCalled();
     expect(prisma.device.upsert).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it('auto-registers unregistered device and continues', async () => {
+  it('upserts device and continues', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => deepgramSuccess,
     });
-    vi.mocked(prisma.device.findUnique).mockResolvedValue(null);
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
     const req = mockMultipartReq(
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
       [audioPart(Buffer.from('fake-audio-bytes'))],
@@ -244,17 +243,17 @@ describe('POST /api/transcribe', () => {
       where: { deviceId: 'a'.repeat(64) },
       update: {},
       create: { deviceId: 'a'.repeat(64) },
+      select: {
+        deviceId: true,
+        dailyRecordLimit: true,
+      },
     });
-    expect(logSpy).toHaveBeenCalledWith(
-      '[transcribe] Auto-registered device',
-      { deviceId: 'a'.repeat(64) },
-    );
     expect(prisma.$executeRaw).toHaveBeenCalledOnce();
   });
 
-  it('returns 500 when device lookup fails', async () => {
+  it('returns 500 when device upsert fails', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => { });
-    vi.mocked(prisma.device.findUnique).mockRejectedValue(new Error('DB down'));
+    vi.mocked(prisma.device.upsert).mockRejectedValue(new Error('DB down'));
     const req = mockReq('POST', {
       'x-proxy-secret': 'test-secret',
       'x-device-id': 'a'.repeat(64),
@@ -268,7 +267,35 @@ describe('POST /api/transcribe', () => {
     expect(r.statusCode).toBe(500);
     expect(r.body).toEqual({ error: 'Internal server error' });
     expect(mockFetch).not.toHaveBeenCalled();
-    expect(prisma.device.upsert).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).toHaveBeenCalledOnce();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 429 when the daily record limit is reached', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-21T10:00:00.000Z'));
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 6 } as never);
+
+    const req = mockMultipartReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [audioPart(Buffer.from('fake-audio-bytes'))],
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(429);
+    expect(r.body).toEqual({
+      error: 'Daily record limit exceeded',
+      quota: {
+        limit: 6,
+        count: 6,
+        remaining: 0,
+        resetAt: '2026-05-22T00:00:00.000Z',
+      },
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
@@ -304,9 +331,14 @@ describe('POST /api/transcribe', () => {
     expect(init.headers.Authorization).toBe('Token dg-test-key');
     expect(init.headers['Content-Type']).toBe('audio/mp4');
     expect(Buffer.from(init.body as Uint8Array).toString()).toBe(audio.toString());
-    expect(prisma.device.findUnique).toHaveBeenCalledWith({
+    expect(prisma.device.upsert).toHaveBeenCalledWith({
       where: { deviceId },
-      select: { deviceId: true },
+      update: {},
+      create: { deviceId },
+      select: {
+        deviceId: true,
+        dailyRecordLimit: true,
+      },
     });
     expect(prisma.$executeRaw).toHaveBeenCalledOnce();
   });

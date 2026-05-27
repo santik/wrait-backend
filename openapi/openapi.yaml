@@ -79,6 +79,8 @@ paths:
           $ref: '#/components/responses/MethodNotAllowed'
         '413':
           $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/DailyRecordLimitExceeded'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '502':
@@ -121,6 +123,8 @@ paths:
           $ref: '#/components/responses/MethodNotAllowed'
         '413':
           $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/DailyRecordLimitExceeded'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '502':
@@ -171,6 +175,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    DailyRecordLimitExceeded:
+      description: Device has reached its daily completed-record limit
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DailyRecordLimitExceededResponse'
     InternalServerError:
       description: Internal backend error
       content:
@@ -191,6 +201,40 @@ components:
       properties:
         error:
           type: string
+    DailyRecordLimitExceededResponse:
+      type: object
+      required:
+        - error
+        - quota
+      properties:
+        error:
+          type: string
+          enum:
+            - Daily record limit exceeded
+        quota:
+          type: object
+          required:
+            - limit
+            - count
+            - remaining
+            - resetAt
+          properties:
+            limit:
+              type: integer
+              minimum: 0
+              description: Effective completed-record limit for the current UTC day.
+            count:
+              type: integer
+              minimum: 0
+              description: Completed records already counted for the current UTC day.
+            remaining:
+              type: integer
+              minimum: 0
+              description: Remaining completed records available before the next UTC reset.
+            resetAt:
+              type: string
+              format: date-time
+              description: Next UTC midnight when the daily record quota resets.
     RegisterResponse:
       type: object
       required:
