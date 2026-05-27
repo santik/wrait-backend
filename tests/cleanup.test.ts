@@ -6,8 +6,10 @@ import { prisma } from '../src/lib/prisma.js';
 vi.mock('../src/lib/prisma.js', () => ({
   prisma: {
     device: {
-      findUnique: vi.fn(),
       upsert: vi.fn(),
+    },
+    callCount: {
+      findUnique: vi.fn(),
     },
     $executeRaw: vi.fn(),
   },
@@ -80,8 +82,12 @@ describe('POST /api/cleanup', () => {
     vi.stubGlobal('fetch', mockFetch);
     process.env.PROXY_SECRET = 'test-secret';
     process.env.OPENAI_API_KEY = 'sk-test-key';
-    vi.mocked(prisma.device.findUnique).mockResolvedValue({ deviceId: 'a'.repeat(64) } as never);
-    vi.mocked(prisma.device.upsert).mockResolvedValue({ deviceId: 'a'.repeat(64), registeredAt: new Date() } as never);
+    vi.mocked(prisma.device.upsert).mockResolvedValue({
+      deviceId: 'a'.repeat(64),
+      registeredAt: new Date(),
+      dailyRecordLimit: null,
+    } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
   });
 
@@ -295,9 +301,9 @@ describe('POST /api/cleanup', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('returns 500 when device lookup fails', async () => {
+  it('returns 500 when device upsert fails', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => { });
-    vi.mocked(prisma.device.findUnique).mockRejectedValue(new Error('DB down'));
+    vi.mocked(prisma.device.upsert).mockRejectedValue(new Error('DB down'));
     const req = mockReq('POST', validHeaders, validBody);
     const res = mockRes();
 
@@ -309,9 +315,7 @@ describe('POST /api/cleanup', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('auto-registers unregistered device and continues', async () => {
-    vi.mocked(prisma.device.findUnique).mockResolvedValue(null);
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => { });
+  it('upserts device and continues', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
 
     const req = mockReq('POST', validHeaders, validBody);
@@ -325,11 +329,36 @@ describe('POST /api/cleanup', () => {
       where: { deviceId: 'a'.repeat(64) },
       update: {},
       create: { deviceId: 'a'.repeat(64) },
+      select: {
+        deviceId: true,
+        dailyRecordLimit: true,
+      },
     });
-    expect(logSpy).toHaveBeenCalledWith(
-      '[cleanup] Auto-registered device',
-      { deviceId: 'a'.repeat(64) },
-    );
+  });
+
+  it('returns 429 when the daily record limit is reached', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-21T10:00:00.000Z'));
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 3 } as never);
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(429);
+    expect(r.body).toEqual({
+      error: 'Daily record limit exceeded',
+      quota: {
+        limit: 3,
+        count: 3,
+        remaining: 0,
+        resetAt: '2026-05-22T00:00:00.000Z',
+      },
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('returns cleanedText on success and increments call count', async () => {
@@ -498,5 +527,44 @@ describe('POST /api/cleanup', () => {
     const dateArg = vi.mocked(prisma.$executeRaw).mock.calls[0][2] as Date;
     expect(dateArg).toBeInstanceOf(Date);
     expect(dateArg.toISOString()).toBe('2026-04-17T00:00:00.000Z');
+  });
+
+  it('allows a request after the UTC reset when quota was full before midnight', async () => {
+    vi.useFakeTimers();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+    vi.mocked(prisma.callCount.findUnique).mockImplementation((args: any) => {
+      const date = args.where.deviceId_date_type.date as Date;
+      if (date.toISOString() === '2026-05-21T00:00:00.000Z') {
+        return Promise.resolve({ count: 3 } as never) as never;
+      }
+      return Promise.resolve(null) as never;
+    });
+
+    vi.setSystemTime(new Date('2026-05-21T23:59:59.000Z'));
+    const beforeResetRes = mockRes();
+    await handler(mockReq('POST', validHeaders, validBody), beforeResetRes);
+
+    expect((beforeResetRes as unknown as MockResShape).statusCode).toBe(429);
+    expect((beforeResetRes as unknown as MockResShape).body).toEqual({
+      error: 'Daily record limit exceeded',
+      quota: {
+        limit: 3,
+        count: 3,
+        remaining: 0,
+        resetAt: '2026-05-22T00:00:00.000Z',
+      },
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date('2026-05-22T00:00:01.000Z'));
+    const afterResetRes = mockRes();
+    await handler(mockReq('POST', validHeaders, validBody), afterResetRes);
+
+    expect((afterResetRes as unknown as MockResShape).statusCode).toBe(200);
+    expect((afterResetRes as unknown as MockResShape).body).toEqual({
+      cleanedText: 'Hello world.',
+      wasTruncated: false,
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
   });
 });

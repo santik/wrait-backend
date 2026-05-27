@@ -7,8 +7,9 @@ datasource db {
 }
 
 model Device {
-  deviceId     String   @id @map("device_id")
-  registeredAt DateTime @default(now()) @db.Timestamptz @map("registered_at")
+  deviceId         String   @id @map("device_id")
+  registeredAt     DateTime @default(now()) @db.Timestamptz @map("registered_at")
+  dailyRecordLimit Int?     @map("daily_record_limit")
 
   @@map("devices")
 }
