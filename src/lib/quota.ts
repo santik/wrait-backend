@@ -88,8 +88,8 @@ export async function verifyDailyRecordQuota(
   dailyRecordLimit: number | null | undefined,
   type: CallCountType,
   label: string,
+  dayBucket = getUTCDayBucket(),
 ): Promise<VerifyDailyRecordQuotaResult> {
-  const dayBucket = getUTCDayBucket();
   const limit = getEffectiveQuotaLimit(dailyRecordLimit, type);
 
   try {

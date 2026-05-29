@@ -8,6 +8,9 @@ vi.mock('../src/lib/prisma.js', () => ({
     device: {
       upsert: vi.fn(),
     },
+    callCount: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -110,11 +113,23 @@ describe('POST /api/register', () => {
       where: { deviceId: validHex },
       update: {},
       create: { deviceId: validHex },
+      select: {
+        deviceId: true,
+        dailyRecordLimit: true,
+      },
     });
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(201);
-    expect(r.body).toEqual({ ok: true });
+    expect(r.body).toEqual({
+      ok: true,
+      quota: {
+        limit: 3,
+        count: 0,
+        remaining: 3,
+        resetAt: expect.any(String),
+      },
+    });
   });
 
   it('handles database errors internally with 500', async () => {
