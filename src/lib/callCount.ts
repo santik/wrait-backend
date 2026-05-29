@@ -20,7 +20,7 @@ export async function incrementCallCount(
   date: Date,
   type: CallCountType,
   label: string,
-): Promise<void> {
+): Promise<boolean> {
   const retryDelaysMs = [0, 25, 75];
 
   for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
@@ -35,7 +35,7 @@ export async function incrementCallCount(
         ON CONFLICT ("device_id", "date", "type")
         DO UPDATE SET "count" = "call_counts"."count" + 1
       `;
-      return;
+      return true;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       const normalizedMessage = errorMessage.toLowerCase();
@@ -51,8 +51,10 @@ export async function incrementCallCount(
           attempt: attempt + 1,
           transient: isTransient,
         });
-        return;
+        return false;
       }
     }
   }
+
+  return false;
 }

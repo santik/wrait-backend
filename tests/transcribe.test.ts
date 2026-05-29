@@ -137,6 +137,12 @@ const deepgramSuccess = {
 const expectedSuccessBody = {
   transcript: 'hello world',
   detected_language: 'en',
+  quota: {
+    limit: 3,
+    count: 0,
+    remaining: 3,
+    resetAt: expect.any(String),
+  },
 };
 
 describe('POST /api/transcribe', () => {

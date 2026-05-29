@@ -371,7 +371,16 @@ describe('POST /api/cleanup', () => {
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
-    expect(r.body).toEqual({ cleanedText: 'Hello world.', wasTruncated: false });
+    expect(r.body).toEqual({
+      cleanedText: 'Hello world.',
+      wasTruncated: false,
+      quota: {
+        limit: 3,
+        count: 1,
+        remaining: 2,
+        resetAt: expect.any(String),
+      },
+    });
     expect(prisma.$executeRaw).toHaveBeenCalledOnce();
   });
 
@@ -412,7 +421,16 @@ describe('POST /api/cleanup', () => {
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
-    expect(r.body).toEqual({ cleanedText: 'Hello world.', wasTruncated: true });
+    expect(r.body).toEqual({
+      cleanedText: 'Hello world.',
+      wasTruncated: true,
+      quota: {
+        limit: 3,
+        count: 1,
+        remaining: 2,
+        resetAt: expect.any(String),
+      },
+    });
   });
 
   it('returns 504 when OpenAI request times out', async () => {
@@ -564,6 +582,12 @@ describe('POST /api/cleanup', () => {
     expect((afterResetRes as unknown as MockResShape).body).toEqual({
       cleanedText: 'Hello world.',
       wasTruncated: false,
+      quota: {
+        limit: 3,
+        count: 1,
+        remaining: 2,
+        resetAt: '2026-05-23T00:00:00.000Z',
+      },
     });
     expect(mockFetch).toHaveBeenCalledOnce();
   });

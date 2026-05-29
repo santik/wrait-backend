@@ -3,7 +3,7 @@ import { CallCountType } from '@prisma/client';
 import { ALLOWED_LANGUAGES } from '../lib/allowedLanguages.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
 import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
-import { verifyDailyRecordQuota } from '../lib/quota.js';
+import { buildRecordQuota, type RecordQuota, verifyDailyRecordQuota } from '../lib/quota.js';
 import {
   errorResponse,
   readRequestBody,
@@ -13,6 +13,10 @@ import {
 } from './http.js';
 import type { OperationResult } from './http.js';
 import type { CleanupErrorResponse, CleanupRequestBody, CleanupResponseBody } from './openapi.js';
+
+type CleanupSuccessBody = CleanupResponseBody & {
+  quota?: RecordQuota;
+};
 
 const MAX_BODY_SIZE = 1 * 1024 * 1024;
 const OPENAI_TIMEOUT_MS = 25000;
@@ -79,7 +83,7 @@ function isCleanupRequestBody(body: unknown): body is CleanupRequestBody {
 
 export async function handleCleanup(
   req: VercelRequest,
-): Promise<OperationResult<CleanupResponseBody, CleanupErrorResponse>> {
+): Promise<OperationResult<CleanupSuccessBody, CleanupErrorResponse>> {
   const methodError = requirePostMethod(req);
   if (methodError) return methodError;
 
@@ -128,11 +132,13 @@ export async function handleCleanup(
     return { status: 500, body: errorResponse('Internal server error') };
   }
 
+  const dayBucket = getUTCDayBucket();
   const quotaCheck = await verifyDailyRecordQuota(
     ensuredDevice.deviceId,
     ensuredDevice.dailyRecordLimit,
     CallCountType.CLEANUP,
     'cleanup',
+    dayBucket,
   );
   if (!quotaCheck.allowed) {
     return { status: quotaCheck.status, body: quotaCheck.body };
@@ -207,13 +213,27 @@ export async function handleCleanup(
     return { status: 502, body: errorResponse('upstream_error') };
   }
 
-  await incrementCallCount(device.deviceId, getUTCDayBucket(), CallCountType.CLEANUP, 'cleanup');
+  const didPersistQuotaUsage = await incrementCallCount(
+    device.deviceId,
+    dayBucket,
+    CallCountType.CLEANUP,
+    'cleanup',
+  );
 
   return {
     status: 200,
     body: {
       cleanedText,
       wasTruncated: parsedBody.transcript.length > TRANSCRIPT_MAX_LENGTH,
+      ...(didPersistQuotaUsage
+        ? {
+            quota: buildRecordQuota(
+              quotaCheck.quota.limit,
+              quotaCheck.quota.count + 1,
+              dayBucket,
+            ),
+          }
+        : {}),
     },
   };
 }

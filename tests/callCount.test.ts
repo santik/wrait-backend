@@ -69,13 +69,13 @@ describe('incrementCallCount', () => {
     expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
   });
 
-  it('resolves to undefined (best-effort — never throws)', async () => {
+  it('resolves to false on terminal failure (best-effort — never throws)', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => { });
     vi.mocked(prisma.$executeRaw).mockRejectedValue(new Error('DB down'));
 
     await expect(
       incrementCallCount(DEVICE_ID, DATE, CallCountType.TRANSCRIPTION, 'test'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 
   it('does not retry on a non-transient error', async () => {

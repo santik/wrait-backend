@@ -4,7 +4,13 @@ import { CallCountType } from '@prisma/client';
 import busboy from 'busboy';
 import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
-import { verifyDailyRecordQuota } from '../lib/quota.js';
+import {
+  buildRecordQuota,
+  getEffectiveQuotaLimit,
+  getSuccessfulCallCount,
+  type RecordQuota,
+  verifyDailyRecordQuota,
+} from '../lib/quota.js';
 import {
   errorResponse,
   requireDeviceId,
@@ -17,6 +23,10 @@ import type {
   TranscribeResponseBody,
   UpstreamErrorResponse,
 } from './openapi.js';
+
+type TranscribeSuccessBody = TranscribeResponseBody & {
+  quota?: RecordQuota;
+};
 
 const DEEPGRAM_TIMEOUT_MS = 55000;
 const MAX_REQUEST_SIZE = 25 * 1024 * 1024;
@@ -263,7 +273,7 @@ function getDeepgramChannel(payload: unknown): { transcript: string; detectedLan
 
 export async function handleTranscribe(
   req: VercelRequest,
-): Promise<OperationResult<TranscribeResponseBody, TranscribeErrorResponse>> {
+): Promise<OperationResult<TranscribeSuccessBody, TranscribeErrorResponse>> {
   const methodError = requirePostMethod(req);
   if (methodError) return methodError;
 
@@ -362,12 +372,35 @@ export async function handleTranscribe(
     await incrementCallCount(device.deviceId, getUTCDayBucket(), CallCountType.TRANSCRIPTION, 'transcribe');
   }
 
+  let cleanupQuota: RecordQuota | undefined;
+  if (dgRes.ok) {
+    try {
+      const dayBucket = getUTCDayBucket();
+      const cleanupCount = await getSuccessfulCallCount(
+        ensuredDevice.deviceId,
+        dayBucket,
+        CallCountType.CLEANUP,
+      );
+      const cleanupLimit = getEffectiveQuotaLimit(
+        ensuredDevice.dailyRecordLimit,
+        CallCountType.CLEANUP,
+      );
+      cleanupQuota = buildRecordQuota(cleanupLimit, cleanupCount, dayBucket);
+    } catch (error) {
+      console.error('[transcribe] Failed to load cleanup quota after successful transcription:', {
+        error: error instanceof Error ? error.message : String(error),
+        deviceId: ensuredDevice.deviceId,
+      });
+    }
+  }
+
   return {
     status: dgRes.ok ? 200 : 502,
     body: dgRes.ok
       ? {
           transcript: deepgramChannel!.transcript,
           detected_language: deepgramChannel!.detectedLanguage,
+          ...(cleanupQuota ? { quota: cleanupQuota } : {}),
         }
       : (payload as UpstreamErrorResponse),
   };
