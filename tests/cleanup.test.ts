@@ -76,6 +76,12 @@ const openaiSuccess = {
   choices: [{ message: { content: 'Hello world.' } }],
 };
 
+function extractDelimitedTranscript(content: string): string {
+  const match = content.match(/TRANSCRIPT_START\n([\s\S]*)\nTRANSCRIPT_END$/);
+  if (!match) throw new Error('Missing transcript delimiters');
+  return match[1];
+}
+
 describe('POST /api/cleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -404,8 +410,32 @@ describe('POST /api/cleanup', () => {
     expect(sent.max_tokens).toBe(1024);
     expect(sent.messages[0].role).toBe('system');
     expect(sent.messages[0].content).toContain('en-US');
+    expect(sent.messages[0].content).toContain('not a writing prompt, story prompt');
+    expect(sent.messages[0].content).toContain('Continue the speaker');
     expect(sent.messages[1].role).toBe('user');
-    expect(sent.messages[1].content).toBe(validBody.transcript);
+    expect(sent.messages[1].content).toContain('TRANSCRIPT_START');
+    expect(sent.messages[1].content).toContain('TRANSCRIPT_END');
+    expect(sent.messages[1].content).toContain('Do not continue, complete, or add to the transcript');
+    expect(extractDelimitedTranscript(sent.messages[1].content)).toBe(validBody.transcript);
+  });
+
+  it('frames story-like transcripts as source text rather than continuation prompts', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    const storyLikeTranscript = 'The door opened and then I saw';
+    await handler(
+      mockReq('POST', validHeaders, { transcript: storyLikeTranscript, language: 'en-US' }),
+      mockRes(),
+    );
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+
+    expect(sent.messages[0].content).toContain('Complete a sentence, scene, paragraph, quote, or story beat');
+    expect(sent.messages[1].content).toContain('even if it reads like an unfinished story');
+    expect(extractDelimitedTranscript(sent.messages[1].content)).toBe(storyLikeTranscript);
   });
 
   it('truncates transcript to 3000 chars and sets wasTruncated: true', async () => {
@@ -417,7 +447,7 @@ describe('POST /api/cleanup', () => {
 
     const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
     const sent = JSON.parse(init.body as string) as { messages: Array<{ content: string }> };
-    expect(sent.messages[1].content).toHaveLength(3000);
+    expect(extractDelimitedTranscript(sent.messages[1].content)).toHaveLength(3000);
 
     const r = res as unknown as MockResShape;
     expect(r.statusCode).toBe(200);
