@@ -42,12 +42,17 @@ paths:
       summary: Proxy audio transcription
       description: |
         Accepts an audio upload as multipart form data, applies backend defaults
-        for the upstream Deepgram request, and returns the normalized backend
-        JSON payload.
+        for the upstream Deepgram request, and returns the normalized backend JSON
+        payload. When language is omitted, the provider detects it automatically.
+        When language is supplied, automatic detection is disabled and that value
+        is used for transcription. Unsupported language values return 400. If the
+        provider rejects an accepted value, the request is not retried with
+        automatic detection.
       security:
         - ProxySecretHeader: []
       parameters:
         - $ref: '#/components/parameters/DeviceIdHeader'
+        - $ref: '#/components/parameters/TranscriptionLanguage'
       requestBody:
         required: true
         content:
@@ -150,6 +155,125 @@ components:
       schema:
         type: string
         pattern: '^[a-fA-F0-9]{64}$'
+    TranscriptionLanguage:
+      name: language
+      in: query
+      required: false
+      description: |
+        Language supported by the `nova-3-general` model. Accepts one value from
+        this enum. Empty, unsupported, malformed, whitespace-containing, or repeated
+        values return 400. `multi` enables multilingual transcription. All other
+        client query parameters are ignored. Source:
+        https://developers.deepgram.com/docs/models-languages-overview/
+      schema:
+        type: string
+        enum:
+          - multi
+          - af
+          - af-ZA
+          - ar
+          - ar-AE
+          - ar-SA
+          - ar-QA
+          - ar-KW
+          - ar-SY
+          - ar-LB
+          - ar-PS
+          - ar-JO
+          - ar-EG
+          - ar-SD
+          - ar-TD
+          - ar-MA
+          - ar-DZ
+          - ar-TN
+          - ar-IQ
+          - ar-IR
+          - hy
+          - as
+          - as-IN
+          - be
+          - bn
+          - bs
+          - bg
+          - ca
+          - zh-HK
+          - zh
+          - zh-CN
+          - zh-Hans
+          - zh-TW
+          - zh-Hant
+          - hr
+          - cs
+          - cs-CZ
+          - da
+          - da-DK
+          - nl
+          - en
+          - en-US
+          - en-AU
+          - en-GB
+          - en-IN
+          - en-NZ
+          - et
+          - fi
+          - nl-BE
+          - fr
+          - fr-CA
+          - ka
+          - ka-GE
+          - de
+          - de-CH
+          - el
+          - gu
+          - gu-IN
+          - he
+          - hi
+          - hu
+          - id
+          - it
+          - ja
+          - kn
+          - kk
+          - kk-KZ
+          - ko
+          - ko-KR
+          - lv
+          - lt
+          - mk
+          - ms
+          - mr
+          - mn
+          - ne
+          - no
+          - ps
+          - ps-AF
+          - fa
+          - pl
+          - pt
+          - pt-BR
+          - pt-PT
+          - pa
+          - pa-IN
+          - ro
+          - ru
+          - sr
+          - sk
+          - sl
+          - es
+          - es-419
+          - sv
+          - sv-SE
+          - tl
+          - ta
+          - te
+          - th
+          - th-TH
+          - tr
+          - tr-TR
+          - uk
+          - ur
+          - vi
+        example: it
   responses:
     BadRequest:
       description: Request validation failed
@@ -371,6 +495,7 @@ components:
           type: string
         detected_language:
           type: string
+          description: Provider-detected language when automatic detection is used, or the requested language in explicit mode.
         quota:
           allOf:
             - $ref: '#/components/schemas/RecordQuota'

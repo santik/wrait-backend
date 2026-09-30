@@ -15,7 +15,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "openapi:lint": "redocly lint openapi/openapi.yaml",
-    "openapi:generate": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.ts",
+    "openapi:generate": "openapi-typescript openapi/openapi.yaml -o src/generated/openapi.ts && node scripts/generate-transcription-languages.js",
     "openapi:check": "npm run openapi:lint && npm run openapi:generate && npm run type-check",
     "test": "vitest run",
     "test:watch": "vitest"

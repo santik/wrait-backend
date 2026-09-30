@@ -12,7 +12,12 @@ import {
   verifyDailyRecordQuota,
 } from '../lib/quota.js';
 import {
+  TRANSCRIPTION_LANGUAGES,
+  type TranscriptionLanguage,
+} from '../generated/transcriptionLanguages.js';
+import {
   errorResponse,
+  getRequestUrl,
   requireDeviceId,
   requirePostMethod,
   requireProxySecret,
@@ -42,6 +47,7 @@ export const ALLOWED_AUDIO_CONTENT_TYPES = [
 ] as const;
 
 type SupportedAudioContentType = (typeof ALLOWED_AUDIO_CONTENT_TYPES)[number];
+const TRANSCRIPTION_LANGUAGE_SET: ReadonlySet<string> = new Set(TRANSCRIPTION_LANGUAGES);
 
 const DEFAULT_TRANSCRIBE_QUERY = {
   model: 'nova-3-general',
@@ -58,7 +64,9 @@ type MultipartAudioUpload = {
   requestSize: number;
 };
 
-function getMultipartContentType(req: VercelRequest): { contentType: string; boundary: string } | null {
+function getMultipartContentType(
+  req: VercelRequest,
+): { contentType: string; boundary: string } | null {
   const contentType = req.headers['content-type'];
   if (typeof contentType !== 'string') {
     return null;
@@ -237,18 +245,48 @@ async function parseMultipartAudioUpload(
   });
 }
 
-function buildDeepgramSearch(): string {
+type RequestedLanguageResult =
+  | { ok: true; value: TranscriptionLanguage | null }
+  | { ok: false; error: OperationResult<never> };
+
+function isTranscriptionLanguage(value: string): value is TranscriptionLanguage {
+  return TRANSCRIPTION_LANGUAGE_SET.has(value);
+}
+
+function getRequestedLanguage(req: VercelRequest): RequestedLanguageResult {
+  const languages = getRequestUrl(req).searchParams.getAll('language');
+  if (languages.length === 0) return { ok: true, value: null };
+
+  if (languages.length !== 1 || !isTranscriptionLanguage(languages[0])) {
+    return {
+      ok: false,
+      error: { status: 400, body: errorResponse('Invalid language') },
+    };
+  }
+
+  return { ok: true, value: languages[0] };
+}
+
+function buildDeepgramSearch(language: string | null): string {
   const searchParams = new URLSearchParams();
 
   for (const [name, value] of Object.entries(DEFAULT_TRANSCRIBE_QUERY)) {
     searchParams.set(name, String(value));
   }
 
+  if (language) {
+    searchParams.delete('detect_language');
+    searchParams.set('language', language);
+  }
+
   const search = searchParams.toString();
   return search ? `?${search}` : '';
 }
 
-function getDeepgramChannel(payload: unknown): { transcript: string; detectedLanguage: string } | null {
+function getDeepgramChannel(
+  payload: unknown,
+  requestedLanguage: string | null,
+): { transcript: string; detectedLanguage: string } | null {
   if (!payload || typeof payload !== 'object') return null;
 
   const results = (payload as { results?: unknown }).results;
@@ -262,7 +300,7 @@ function getDeepgramChannel(payload: unknown): { transcript: string; detectedLan
   if (!Array.isArray(alternatives) || alternatives.length === 0) return null;
 
   const transcript = (alternatives[0] as { transcript?: unknown }).transcript;
-  const detectedLanguage = firstChannel.detected_language;
+  const detectedLanguage = requestedLanguage ?? firstChannel.detected_language;
 
   if (typeof transcript !== 'string' || typeof detectedLanguage !== 'string') {
     return null;
@@ -288,6 +326,10 @@ export async function handleTranscribe(
     console.error('[transcribe] Invalid Content-Type:', req.headers['content-type']);
     return { status: 400, body: errorResponse('Invalid Content-Type') };
   }
+
+  const languageResult = getRequestedLanguage(req);
+  if (!languageResult.ok) return languageResult.error;
+  const requestedLanguage = languageResult.value;
 
   let ensuredDevice: EnsuredDevice;
   try {
@@ -320,7 +362,7 @@ export async function handleTranscribe(
     hasSecret: !!req.headers['x-proxy-secret'],
   });
 
-  const search = buildDeepgramSearch();
+  const search = buildDeepgramSearch(requestedLanguage);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEEPGRAM_TIMEOUT_MS);
@@ -356,7 +398,7 @@ export async function handleTranscribe(
     return { status: 502, body: errorResponse('Invalid response from upstream') };
   }
 
-  const deepgramChannel = getDeepgramChannel(payload);
+  const deepgramChannel = getDeepgramChannel(payload, requestedLanguage);
 
   console.log('[transcribe] Deepgram response', {
     status: dgRes.status,
@@ -369,7 +411,12 @@ export async function handleTranscribe(
       console.error('[transcribe] Unexpected Deepgram response shape');
       return { status: 502, body: errorResponse('Invalid response from upstream') };
     }
-    await incrementCallCount(device.deviceId, getUTCDayBucket(), CallCountType.TRANSCRIPTION, 'transcribe');
+    await incrementCallCount(
+      device.deviceId,
+      getUTCDayBucket(),
+      CallCountType.TRANSCRIPTION,
+      'transcribe',
+    );
   }
 
   let cleanupQuota: RecordQuota | undefined;
