@@ -69,18 +69,18 @@ The codebase uses two database URLs for different purposes:
 
 ### Required at Runtime
 
-| Variable | Used by | Purpose |
-| --- | --- | --- |
-| `DATABASE_URL` | `src/lib/prisma.ts` | Postgres connection string for API runtime |
-| `NODE_ENV` | `src/lib/prisma.ts` | Enables Prisma client reuse outside production |
-| `PROXY_SECRET` | `api/register.ts`, `api/transcribe.ts`, `api/cleanup.ts` | Shared secret required on protected routes |
-| `DEEPGRAM_API_KEY` | `api/transcribe.ts` | Authenticates requests to Deepgram |
-| `OPENAI_API_KEY` | `api/cleanup.ts` | Authenticates requests to OpenAI |
+| Variable           | Used by                                                  | Purpose                                        |
+| ------------------ | -------------------------------------------------------- | ---------------------------------------------- |
+| `DATABASE_URL`     | `src/lib/prisma.ts`                                      | Postgres connection string for API runtime     |
+| `NODE_ENV`         | `src/lib/prisma.ts`                                      | Enables Prisma client reuse outside production |
+| `PROXY_SECRET`     | `api/register.ts`, `api/transcribe.ts`, `api/cleanup.ts` | Shared secret required on protected routes     |
+| `DEEPGRAM_API_KEY` | `api/transcribe.ts`                                      | Authenticates requests to Deepgram             |
+| `OPENAI_API_KEY`   | `api/cleanup.ts`                                         | Authenticates requests to OpenAI               |
 
 ### Required for Prisma Commands
 
-| Variable | Used by | Purpose |
-| --- | --- | --- |
+| Variable                | Used by            | Purpose                            |
+| ----------------------- | ------------------ | ---------------------------------- |
 | `DATABASE_URL_UNPOOLED` | `prisma.config.ts` | Direct database URL for Prisma CLI |
 
 ### Example `.env`
@@ -137,11 +137,12 @@ The authored API contract lives in:
 
 - `openapi/openapi.yaml`
 
-Generated TypeScript contract types are written to:
+Generated TypeScript contract types and runtime language values are written to:
 
 - `src/generated/openapi.ts`
+- `src/generated/transcriptionLanguages.ts`
 
-That generated file is intentionally ignored. Regenerate it instead of editing or committing it.
+Those generated files are intentionally ignored. Regenerate them instead of editing or committing them.
 
 ### Regeneration Commands
 
@@ -152,7 +153,7 @@ npm run openapi:check
 
 Notes:
 
-- `npm run openapi:generate` refreshes `src/generated/openapi.ts`
+- `npm run openapi:generate` refreshes both generated files from `openapi/openapi.yaml`
 - `npm run openapi:check` lints the spec, regenerates types, and runs `tsc`
 - `npm install`, `npm test`, and `npm run type-check` also regenerate the OpenAPI types automatically
 
@@ -230,9 +231,20 @@ Supported `audio` file content types:
 - `audio/wav`
 - `audio/webm`
 
-#### Upstream defaults
+#### Optional language
 
-The backend does not accept client query parameters for this endpoint. It always calls Deepgram with:
+Pass one `language` query parameter when the recording language is known:
+
+```http
+POST /api/transcribe?language=it
+```
+
+The value must be one of the `nova-3-general` language options published in the
+OpenAPI `TranscriptionLanguage` enum, such as `it`, `en-US`, `zh-Hans`, or
+`multi`. Empty, unsupported, malformed, whitespace-containing, or repeated
+values return `400` with `{ "error": "Invalid language" }`.
+
+When language is omitted, the backend calls Deepgram with:
 
 - `model=nova-3-general`
 - `detect_language=true`
@@ -240,6 +252,11 @@ The backend does not accept client query parameters for this endpoint. It always
 - `filler_words=true`
 - `punctuate=true`
 - `smart_format=true`
+
+When language is supplied, the backend replaces `detect_language=true` with
+`language=<value>`. Other client query parameters remain ignored. A language that
+is accepted by the contract but rejected by Deepgram returns the existing
+upstream error; the backend does not retry with automatic detection.
 
 #### Constraints
 
@@ -265,6 +282,7 @@ The backend does not accept client query parameters for this endpoint. It always
 
 - `401` unauthorized
 - `400` invalid device ID or unsupported `Content-Type`
+- `400` invalid or repeated `language` query parameter
 - `413` request too large
 - `500` database failure while validating the device
 - `502` Deepgram/network/invalid-upstream-response failure
@@ -377,21 +395,21 @@ The database has two tables and one enum:
 
 Tracks known client devices.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `device_id` | `String` | Primary key |
+| Column          | Type       | Notes               |
+| --------------- | ---------- | ------------------- |
+| `device_id`     | `String`   | Primary key         |
 | `registered_at` | `DateTime` | Defaults to `now()` |
 
 ### `call_counts`
 
 Tracks successful API usage by device, day, and operation type.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `device_id` | `String` | Device identifier |
-| `date` | `Date` | UTC day bucket |
-| `type` | `CallCountType` | `TRANSCRIPTION` or `CLEANUP` |
-| `count` | `Int` | Defaults to `1` |
+| Column      | Type            | Notes                        |
+| ----------- | --------------- | ---------------------------- |
+| `device_id` | `String`        | Device identifier            |
+| `date`      | `Date`          | UTC day bucket               |
+| `type`      | `CallCountType` | `TRANSCRIPTION` or `CLEANUP` |
+| `count`     | `Int`           | Defaults to `1`              |
 
 Unique key: `(device_id, date, type)`
 
@@ -464,7 +482,7 @@ Vercel runs `npm install`, which triggers `postinstall`. In this project that me
 - Prisma client generation
 - OpenAPI type generation
 
-Because `src/generated/openapi.ts` is ignored, successful installs depend on that generation step running.
+Because `src/generated/` is ignored, successful installs depend on that generation step running.
 
 ### 4. Apply database migrations
 
@@ -537,6 +555,15 @@ curl -X POST "https://your-deployment.vercel.app/api/transcribe" \
   -F "audio=@tests/audio.wav;type=audio/wav"
 ```
 
+To bypass automatic detection when the language is known:
+
+```bash
+curl -X POST "https://your-deployment.vercel.app/api/transcribe?language=it" \
+  -H "X-Proxy-Secret: $PROXY_SECRET" \
+  -H "X-Device-Id: $DEVICE_ID" \
+  -F "audio=@tests/audio.wav;type=audio/wav"
+```
+
 ### Cleanup
 
 ```bash
@@ -554,7 +581,7 @@ curl -X POST https://your-deployment.vercel.app/api/cleanup \
 
 - `GET /api/hello` is public; all other routes require the proxy secret.
 - `register` requires explicit registration, but `transcribe` and `cleanup` also auto-register missing devices.
-- `transcribe` returns a backend-shaped success response with `transcript` and `detected_language`.
-- `transcribe` ignores client query parameters and uses backend-owned Deepgram defaults.
+- `transcribe` returns a backend-shaped success response with `transcript` and `detected_language`. The latter is provider-detected in automatic mode and the requested value in explicit mode.
+- `transcribe` accepts only the optional `language` query parameter; other query parameters are ignored and backend-owned Deepgram defaults remain enforced.
 - `cleanup` returns a backend-shaped response with `cleanedText` and `wasTruncated`.
 - The shared `json()` helper always sets `Cache-Control`, defaulting to `no-store`.

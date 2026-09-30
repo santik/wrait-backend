@@ -258,7 +258,7 @@ describe('POST /api/transcribe', () => {
   });
 
   it('returns 500 when device upsert fails', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => { });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(prisma.device.upsert).mockRejectedValue(new Error('DB down'));
     const req = mockReq('POST', {
       'x-proxy-secret': 'test-secret',
@@ -313,10 +313,9 @@ describe('POST /api/transcribe', () => {
 
     const audio = Buffer.from('fake-audio-bytes');
     const deviceId = 'a'.repeat(64);
-    const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': deviceId },
-      [audioPart(audio, 'audio/mp4')],
-    );
+    const req = mockMultipartReq({ 'x-proxy-secret': 'test-secret', 'x-device-id': deviceId }, [
+      audioPart(audio, 'audio/mp4'),
+    ]);
     const res = mockRes();
 
     await handler(req, res);
@@ -326,7 +325,10 @@ describe('POST /api/transcribe', () => {
     expect(r.body).toEqual(expectedSuccessBody);
 
     expect(mockFetch).toHaveBeenCalledOnce();
-    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
+    const [url, init] = mockFetch.mock.calls[0] as [
+      string,
+      RequestInit & { headers: Record<string, string> },
+    ];
     expect(url).toContain('https://api.deepgram.com/v1/listen');
     expect(url).toContain('model=nova-3-general');
     expect(url).toContain('detect_language=true');
@@ -370,7 +372,108 @@ describe('POST /api/transcribe', () => {
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it('ignores incoming query parameters and uses backend defaults', async () => {
+  it.each([
+    ['it', 'it'],
+    ['en-US', 'en-US'],
+    ['en%2DUS', 'en-US'],
+    ['multi', 'multi'],
+    ['zh-Hans', 'zh-Hans'],
+    ['zh-Hant', 'zh-Hant'],
+  ])(
+    'uses explicit language %s without automatic detection',
+    async (queryLanguage, expectedLanguage) => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          results: { channels: [{ alternatives: [{ transcript: 'hello world' }] }] },
+        }),
+      });
+
+      const req = mockMultipartReq(
+        { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+        [audioPart(Buffer.from('audio'))],
+        `/api/transcribe?language=${queryLanguage}`,
+      );
+      const res = mockRes();
+
+      await handler(req, res);
+
+      const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const upstreamUrl = new URL(url);
+      expect(upstreamUrl.searchParams.get('language')).toBe(expectedLanguage);
+      expect(upstreamUrl.searchParams.has('detect_language')).toBe(false);
+      expect((res as unknown as MockResShape).statusCode).toBe(200);
+      expect((res as unknown as MockResShape).body).toEqual({
+        ...expectedSuccessBody,
+        detected_language: expectedLanguage,
+      });
+      expect(prisma.$executeRaw).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('uses the requested language when upstream detection metadata differs', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
+
+    const req = mockMultipartReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [audioPart(Buffer.from('audio'))],
+      '/api/transcribe?language=it',
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    expect((res as unknown as MockResShape).body).toEqual({
+      ...expectedSuccessBody,
+      detected_language: 'it',
+    });
+  });
+
+  it.each([
+    '/api/transcribe?language=',
+    '/api/transcribe?language',
+    '/api/transcribe?language=IT',
+    '/api/transcribe?language=en-us',
+    '/api/transcribe?language=en_US',
+    '/api/transcribe?language=eng',
+    '/api/transcribe?language=zzz',
+    '/api/transcribe?language=it%20',
+    '/api/transcribe?language=it%0A',
+    '/api/transcribe?language=%C3%A9',
+    `/api/transcribe?language=${'a'.repeat(1000)}`,
+    '/api/transcribe?language=it&language=it',
+    '/api/transcribe?language=it&language=nl',
+    '/api/transcribe?language=it%26detect_language%3Dtrue',
+  ])('rejects invalid language query in %s before persistence', async (url) => {
+    const req = mockMultipartReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [audioPart(Buffer.from('audio'))],
+      url,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(400);
+    expect((res as unknown as MockResShape).body).toEqual({ error: 'Invalid language' });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+    expect(prisma.callCount.findUnique).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('keeps method and authentication errors ahead of language validation', async () => {
+    const getRes = mockRes();
+    await handler(mockReq('GET', {}, undefined, '/api/transcribe?language=IT'), getRes);
+    expect((getRes as unknown as MockResShape).statusCode).toBe(405);
+
+    const unauthorizedRes = mockRes();
+    await handler(mockReq('POST', {}, undefined, '/api/transcribe?language=IT'), unauthorizedRes);
+    expect((unauthorizedRes as unknown as MockResShape).statusCode).toBe(401);
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+  });
+
+  it('accepts language while ignoring all other incoming query parameters', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
 
     const req = mockMultipartReq(
@@ -384,8 +487,27 @@ describe('POST /api/transcribe', () => {
 
     const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      'https://api.deepgram.com/v1/listen?model=nova-3-general&detect_language=true&utterances=false&filler_words=true&punctuate=true&smart_format=true',
+      'https://api.deepgram.com/v1/listen?model=nova-3-general&utterances=false&filler_words=true&punctuate=true&smart_format=true&language=nl',
     );
+  });
+
+  it('does not retry a provider-rejected supported language', async () => {
+    const dgError = { error: 'Bad Request', reason: 'language unavailable' };
+    mockFetch.mockResolvedValue({ ok: false, json: async () => dgError });
+
+    const req = mockMultipartReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [audioPart(Buffer.from('audio'))],
+      '/api/transcribe?language=af',
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(502);
+    expect((res as unknown as MockResShape).body).toEqual(dgError);
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('uses backend default query parameters when only an audio part is provided', async () => {
@@ -418,7 +540,10 @@ describe('POST /api/transcribe', () => {
 
     await handler(req, res);
 
-    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
+    const [, init] = mockFetch.mock.calls[0] as [
+      string,
+      RequestInit & { headers: Record<string, string> },
+    ];
     expect(init.headers['Content-Type']).toBe('audio/webm');
     expect((res as unknown as MockResShape).body).toEqual(expectedSuccessBody);
   });
@@ -483,7 +608,7 @@ describe('POST /api/transcribe', () => {
       json: async () => deepgramSuccess,
     });
     vi.mocked(prisma.$executeRaw).mockRejectedValue(new Error('DB error'));
-    vi.spyOn(console, 'error').mockImplementation(() => { });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const req = mockMultipartReq(
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
@@ -541,6 +666,28 @@ describe('POST /api/transcribe', () => {
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
+  it('returns 502 when explicit-language success is missing transcript fields', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: { channels: [{ alternatives: [{}] }] } }),
+    });
+
+    const req = mockMultipartReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [audioPart(Buffer.from('audio'))],
+      '/api/transcribe?language=it',
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(502);
+    expect((res as unknown as MockResShape).body).toEqual({
+      error: 'Invalid response from upstream',
+    });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
   it('returns 502 when Deepgram success payload is missing detected language', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
@@ -592,10 +739,9 @@ describe('POST /api/transcribe', () => {
     });
 
     const makeReq = () =>
-      mockMultipartReq(
-        { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
-        [audioPart(Buffer.from('fake-audio-bytes'))],
-      );
+      mockMultipartReq({ 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) }, [
+        audioPart(Buffer.from('fake-audio-bytes')),
+      ]);
 
     vi.setSystemTime(new Date('2026-04-17T10:00:00.000Z'));
     await handler(makeReq(), mockRes());
@@ -614,7 +760,11 @@ describe('POST /api/transcribe', () => {
   it('rejects non-multipart Content-Type with 400', async () => {
     const req = mockReq(
       'POST',
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'audio/mp4' },
+      {
+        'x-proxy-secret': 'test-secret',
+        'x-device-id': 'a'.repeat(64),
+        'content-type': 'audio/mp4',
+      },
       Buffer.from('audio'),
     );
     const res = mockRes();

@@ -7,6 +7,7 @@ import registerHandler from '../api/register.js';
 import transcribeHandler from '../api/transcribe.js';
 import cleanupHandler from '../api/cleanup.js';
 import { ALLOWED_LANGUAGES } from '../src/lib/allowedLanguages.js';
+import { TRANSCRIPTION_LANGUAGES } from '../src/generated/transcriptionLanguages.js';
 import { prisma } from '../src/lib/prisma.js';
 
 vi.mock('../src/lib/prisma.js', () => ({
@@ -50,9 +51,19 @@ type MultipartPart = {
 
 type OpenApiSpec = {
   components: {
+    parameters: Record<string, unknown>;
     schemas: Record<string, unknown>;
   };
-  paths: Record<string, Record<string, { responses: Record<string, unknown> }>>;
+  paths: Record<
+    string,
+    Record<
+      string,
+      {
+        parameters?: unknown[];
+        responses: Record<string, unknown>;
+      }
+    >
+  >;
 };
 
 function mockRes() {
@@ -154,7 +165,11 @@ function mockMultipartTranscribeReq(
 
 function mockCleanupReq(method: string, headers: Record<string, string>, body?: unknown) {
   const bodyBuffer =
-    body instanceof Buffer ? body : body !== undefined ? Buffer.from(JSON.stringify(body)) : undefined;
+    body instanceof Buffer
+      ? body
+      : body !== undefined
+        ? Buffer.from(JSON.stringify(body))
+        : undefined;
   const chunks = bodyBuffer ? [bodyBuffer] : [];
   let idx = 0;
 
@@ -280,7 +295,10 @@ describe('OpenAPI contract', () => {
     await registerHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(201);
-    expectToMatchSchema(getResponseSchema(spec, '/api/register', 'post', 201), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/register', 'post', 201),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('register unauthorized error matches the OpenAPI 401 response schema', async () => {
@@ -290,7 +308,10 @@ describe('OpenAPI contract', () => {
     await registerHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(401);
-    expectToMatchSchema(getResponseSchema(spec, '/api/register', 'post', 401), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/register', 'post', 401),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('transcribe success matches the OpenAPI 200 response schema', async () => {
@@ -310,14 +331,102 @@ describe('OpenAPI contract', () => {
 
     const req = mockMultipartTranscribeReq(
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
-      [{ name: 'audio', filename: 'recording.m4a', contentType: 'audio/m4a', body: Buffer.from('audio') }],
+      [
+        {
+          name: 'audio',
+          filename: 'recording.m4a',
+          contentType: 'audio/m4a',
+          body: Buffer.from('audio'),
+        },
+      ],
     );
     const res = mockRes();
 
     await transcribeHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(200);
-    expectToMatchSchema(getResponseSchema(spec, '/api/transcribe', 'post', 200), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/transcribe', 'post', 200),
+      (res as unknown as MockResShape).body,
+    );
+  });
+
+  it('documents and validates the optional transcription language query parameter', () => {
+    const operation = spec.paths['/api/transcribe'].post;
+    const parameters = resolveRefs(spec, operation.parameters) as Array<{
+      name?: string;
+      in?: string;
+      required?: boolean;
+      schema?: Record<string, unknown>;
+    }>;
+    const language = parameters.find((parameter) => parameter.name === 'language');
+
+    expect(language).toMatchObject({ name: 'language', in: 'query', required: false });
+    const languageSchema = language!.schema as Record<string, unknown> & { enum?: string[] };
+    expect(languageSchema.enum).toEqual([...TRANSCRIPTION_LANGUAGES]);
+    const validate = new Ajv({ allErrors: true, strict: false }).compile(languageSchema);
+
+    for (const value of ['it', 'nl', 'en-US', 'multi', 'zh-Hans', 'zh-Hant']) {
+      expect(validate(value), value).toBe(true);
+    }
+    for (const value of ['', 'IT', 'en-us', 'en_US', 'eng', 'zzz', 'it ', 'it\n']) {
+      expect(validate(value), value).toBe(false);
+    }
+  });
+
+  it('explicit-language transcribe success matches the OpenAPI 200 response schema', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: { channels: [{ alternatives: [{ transcript: 'buongiorno' }] }] },
+      }),
+    });
+    const req = mockMultipartTranscribeReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [
+        {
+          name: 'audio',
+          filename: 'recording.m4a',
+          contentType: 'audio/m4a',
+          body: Buffer.from('audio'),
+        },
+      ],
+      '/api/transcribe?language=it',
+    );
+    const res = mockRes();
+
+    await transcribeHandler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(200);
+    expect((res as unknown as MockResShape).body).toMatchObject({ detected_language: 'it' });
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/transcribe', 'post', 200),
+      (res as unknown as MockResShape).body,
+    );
+  });
+
+  it('invalid transcription language matches the OpenAPI 400 response schema', async () => {
+    const req = mockMultipartTranscribeReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [
+        {
+          name: 'audio',
+          filename: 'recording.m4a',
+          contentType: 'audio/m4a',
+          body: Buffer.from('audio'),
+        },
+      ],
+      '/api/transcribe?language=IT',
+    );
+    const res = mockRes();
+
+    await transcribeHandler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(400);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/transcribe', 'post', 400),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('transcribe upstream failure matches the OpenAPI 502 response schema', async () => {
@@ -328,14 +437,24 @@ describe('OpenAPI contract', () => {
 
     const req = mockMultipartTranscribeReq(
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
-      [{ name: 'audio', filename: 'recording.m4a', contentType: 'audio/m4a', body: Buffer.from('audio') }],
+      [
+        {
+          name: 'audio',
+          filename: 'recording.m4a',
+          contentType: 'audio/m4a',
+          body: Buffer.from('audio'),
+        },
+      ],
     );
     const res = mockRes();
 
     await transcribeHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(502);
-    expectToMatchSchema(getResponseSchema(spec, '/api/transcribe', 'post', 502), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/transcribe', 'post', 502),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('transcribe quota-exceeded error matches the OpenAPI 429 response schema', async () => {
@@ -345,14 +464,24 @@ describe('OpenAPI contract', () => {
 
     const req = mockMultipartTranscribeReq(
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
-      [{ name: 'audio', filename: 'recording.m4a', contentType: 'audio/m4a', body: Buffer.from('audio') }],
+      [
+        {
+          name: 'audio',
+          filename: 'recording.m4a',
+          contentType: 'audio/m4a',
+          body: Buffer.from('audio'),
+        },
+      ],
     );
     const res = mockRes();
 
     await transcribeHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(429);
-    expectToMatchSchema(getResponseSchema(spec, '/api/transcribe', 'post', 429), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/transcribe', 'post', 429),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('cleanup success matches the OpenAPI 200 response schema', async () => {
@@ -375,7 +504,10 @@ describe('OpenAPI contract', () => {
     await cleanupHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(200);
-    expectToMatchSchema(getResponseSchema(spec, '/api/cleanup', 'post', 200), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/cleanup', 'post', 200),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('cleanup invalid-content-type error matches the OpenAPI 400 response schema', async () => {
@@ -393,7 +525,10 @@ describe('OpenAPI contract', () => {
     await cleanupHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(400);
-    expectToMatchSchema(getResponseSchema(spec, '/api/cleanup', 'post', 400), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/cleanup', 'post', 400),
+      (res as unknown as MockResShape).body,
+    );
   });
 
   it('cleanup quota-exceeded error matches the OpenAPI 429 response schema', async () => {
@@ -415,6 +550,9 @@ describe('OpenAPI contract', () => {
     await cleanupHandler(req, res);
 
     expect((res as unknown as MockResShape).statusCode).toBe(429);
-    expectToMatchSchema(getResponseSchema(spec, '/api/cleanup', 'post', 429), (res as unknown as MockResShape).body);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/cleanup', 'post', 429),
+      (res as unknown as MockResShape).body,
+    );
   });
 });
