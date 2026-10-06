@@ -4,6 +4,7 @@ type JsonContent<T> = T extends { content: { 'application/json': infer Body } } 
 
 export type ErrorResponse = components['schemas']['ErrorResponse'];
 export type DailyRecordLimitExceededResponse = components['schemas']['DailyRecordLimitExceededResponse'];
+export type SpeechNotRecognizedResponse = components['schemas']['SpeechNotRecognizedResponse'];
 export type UpstreamErrorResponse = components['schemas']['UpstreamErrorResponse'];
 
 export type RegisterHeaders = operations['registerDevice']['parameters']['header'];
@@ -20,4 +21,5 @@ export type TranscribeResponseBody = JsonContent<operations['transcribeAudio']['
 export type TranscribeErrorResponse =
   | ErrorResponse
   | DailyRecordLimitExceededResponse
+  | SpeechNotRecognizedResponse
   | UpstreamErrorResponse;

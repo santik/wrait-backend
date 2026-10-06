@@ -491,6 +491,59 @@ describe('POST /api/transcribe', () => {
     );
   });
 
+  describe('empty transcript', () => {
+    const headers = { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) };
+    const emptyPayload = (transcript: string) => ({
+      results: { channels: [{ alternatives: [{ transcript }], detected_language: 'en' }] },
+    });
+
+    it.each([
+      ['', '/api/transcribe?language=de', { language: 'de' }],
+      ['   \n ', '/api/transcribe?language=de', { language: 'de' }],
+      ['', '/api/transcribe', {}],
+      ['  ', '/api/transcribe', {}],
+    ])(
+      'returns 422 for transcript %j at %s with one provider request',
+      async (transcript, url, extra) => {
+        mockFetch.mockResolvedValue({ ok: true, json: async () => emptyPayload(transcript) });
+        const res = mockRes();
+
+        await handler(mockMultipartReq(headers, [audioPart(Buffer.from('audio'))], url), res);
+
+        expect((res as unknown as MockResShape).statusCode).toBe(422);
+        expect((res as unknown as MockResShape).body).toEqual({
+          error: 'Speech could not be recognized',
+          reason: 'speech_not_recognized',
+          ...extra,
+        });
+        expect(mockFetch).toHaveBeenCalledOnce();
+        expect(prisma.$executeRaw).not.toHaveBeenCalled();
+        expect(prisma.callCount.findUnique).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('keeps 502 for provider errors, not 422', async () => {
+      mockFetch.mockResolvedValue({ ok: false, json: async () => ({ error: 'Bad' }) });
+      const res = mockRes();
+
+      await handler(
+        mockMultipartReq(headers, [audioPart(Buffer.from('audio'))], '/api/transcribe?language=de'),
+        res,
+      );
+
+      expect((res as unknown as MockResShape).statusCode).toBe(502);
+    });
+
+    it('keeps 502 for a malformed success payload, not 422', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: {} }) });
+      const res = mockRes();
+
+      await handler(mockMultipartReq(headers, [audioPart(Buffer.from('audio'))]), res);
+
+      expect((res as unknown as MockResShape).statusCode).toBe(502);
+    });
+  });
+
   it('does not retry a provider-rejected supported language', async () => {
     const dgError = { error: 'Bad Request', reason: 'language unavailable' };
     mockFetch.mockResolvedValue({ ok: false, json: async () => dgError });
