@@ -276,7 +276,26 @@ upstream error; the backend does not retry with automatic detection.
 }
 ```
 
+- `transcript` is always non-empty on `200`
 - Increments the `TRANSCRIPTION` call counter for the current UTC day
+
+#### Empty transcript (`422`)
+
+If Deepgram succeeds but returns an empty transcript (silence, or speech in a
+language other than the requested one), the endpoint returns `422` instead of `200`:
+
+```json
+{
+  "error": "Speech could not be recognized",
+  "reason": "speech_not_recognized",
+  "language": "de"
+}
+```
+
+- `language` echoes the requested language and is omitted in automatic mode
+- Exactly one Deepgram request is made; there is no retry or automatic-detection fallback
+- Not counted as a successful transcription, and no `quota` is returned
+- Client guidance: keep the recording, change the language or use automatic detection, then retry
 
 #### Error responses
 
@@ -284,6 +303,7 @@ upstream error; the backend does not retry with automatic detection.
 - `400` invalid device ID or unsupported `Content-Type`
 - `400` invalid or repeated `language` query parameter
 - `413` request too large
+- `422` empty transcript (`speech_not_recognized`)
 - `500` database failure while validating the device
 - `502` Deepgram/network/invalid-upstream-response failure
 - `504` Deepgram timeout
@@ -581,7 +601,7 @@ curl -X POST https://your-deployment.vercel.app/api/cleanup \
 
 - `GET /api/hello` is public; all other routes require the proxy secret.
 - `register` requires explicit registration, but `transcribe` and `cleanup` also auto-register missing devices.
-- `transcribe` returns a backend-shaped success response with `transcript` and `detected_language`. The latter is provider-detected in automatic mode and the requested value in explicit mode.
+- `transcribe` returns a backend-shaped success response with `transcript` and `detected_language`. The latter is provider-detected in automatic mode and the requested value in explicit mode. An empty transcript returns `422` with `reason: speech_not_recognized` rather than `200`.
 - `transcribe` accepts only the optional `language` query parameter; other query parameters are ignored and backend-owned Deepgram defaults remain enforced.
 - `cleanup` returns a backend-shaped response with `cleanedText` and `wasTruncated`.
 - The shared `json()` helper always sets `Cache-Control`, defaulting to `no-store`.

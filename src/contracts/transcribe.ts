@@ -411,6 +411,19 @@ export async function handleTranscribe(
       console.error('[transcribe] Unexpected Deepgram response shape');
       return { status: 502, body: errorResponse('Invalid response from upstream') };
     }
+    if (deepgramChannel.transcript.trim() === '') {
+      console.warn('[transcribe] Empty transcript from Deepgram', {
+        language: requestedLanguage ?? 'auto',
+      });
+      return {
+        status: 422,
+        body: {
+          error: 'Speech could not be recognized',
+          reason: 'speech_not_recognized',
+          ...(requestedLanguage ? { language: requestedLanguage } : {}),
+        },
+      };
+    }
     await incrementCallCount(
       device.deviceId,
       getUTCDayBucket(),

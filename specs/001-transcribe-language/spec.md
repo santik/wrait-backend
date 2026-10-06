@@ -15,6 +15,8 @@
 | 2026-09-29 | Approved | Codex  | User approved finalized specification; Plan phase authorized.                                             |
 | 2026-09-29 | Complete | Codex  | Implementation and required validation completed; repository-wide lint retains two pre-existing failures. |
 | 2026-09-29 | Complete | Codex  | Follow-up: published and enforced the current Deepgram `nova-3-general` language enum.                    |
+| 2026-10-06 | Approved | Claude | Follow-up amendment: empty transcript returns 422 `speech_not_recognized`; no extra provider call. Open questions resolved by user; finalized. |
+| 2026-10-06 | Complete | Claude | Follow-up implemented and validated (see tasks.md evidence); lint retains two pre-existing failures. |
 
 ## Overview
 
@@ -156,6 +158,62 @@ response semantics, and upstream failure behavior. Review clarified decoded-valu
 validation, strict casing, identical duplicates, authentication precedence, no
 automatic retry, and continued transcript validation without changing scope.
 
+## Follow-up amendment: empty transcript is a failure (Complete)
+
+**Problem.** When the caller supplies a language and the speaker uses a different
+one, the provider returns an empty transcript. Today the endpoint answers 200
+with an empty transcript and echoes the requested (wrong) `detected_language`.
+The app cannot tell this from success, and it stores the wrong language.
+
+**Decision (user, 2026-10-06).** Do **not** make additional provider requests.
+Instead, an empty transcript is reported as an error so the client treats it as
+a transcription failure. The client already keeps the audio draft on failure, so
+the user keeps the recording, may change the language, and retry later.
+
+### Additional acceptance criteria
+
+- [x] AC9: When the provider responds successfully but the transcript is empty
+      (zero length after trimming whitespace), `POST /api/transcribe` returns
+      HTTP 422 instead of 200, with a body containing the existing `error` string
+      and a stable machine-readable `reason` of `speech_not_recognized`.
+- [x] AC10: The rule applies in explicit and automatic mode. The 422 body also
+      echoes the requested `language` when one was supplied, so the client can
+      show a targeted message; `language` is omitted in automatic mode.
+- [x] AC11: No success is counted for a 422 response, and no `quota` object is
+      returned. The failed attempt does not consume the daily allowance.
+- [x] AC12: Exactly one provider request is made per accepted request in every
+      case. There is no retry or fallback detection.
+- [x] AC13: A non-empty transcript behaves exactly as before (AC5 unchanged).
+- [x] AC14: Provider errors, timeouts, and malformed provider responses keep
+      their existing 502/504 behavior and are distinct from 422.
+- [x] AC15: The OpenAPI contract declares the 422 response (error schema with
+      required `error` and `reason`, optional `language`, `reason` limited to
+      `speech_not_recognized`), and states that 200 responses carry a non-empty
+      transcript. Generated types, README, and regression and contract tests
+      cover it, including client guidance (change the language or use automatic
+      detection, then retry).
+
+### Impact on earlier text
+
+- AC5: a successful (200) response always has a non-empty transcript.
+- Existing 502 behavior for explicit mode with malformed responses is unchanged.
+- Empty-transcript responses are no longer a documented success case.
+
+### Additional test strategy
+
+- Explicit language, empty or whitespace-only transcript: 422, `speech_not_recognized`,
+  language echoed, one provider request, no success count, no quota.
+- Automatic mode, empty transcript: 422, `reason` present, `language` absent.
+- Non-empty transcript: unchanged 200 with accounting.
+- Provider 4xx/5xx, timeout, malformed payload: still 502/504.
+- Contract test validates the 422 body against the documented schema.
+
+### Resolved questions
+
+1. Automatic mode also returns 422 on an empty transcript (approved).
+2. Reason is `speech_not_recognized`; it asserts no cause (approved).
+3. Body shape `{ "error", "reason", "language"? }` (approved).
+
 ## Open questions
 
-None. Implementation and validation are complete.
+None. The original scope is complete; the follow-up amendment has no open questions.

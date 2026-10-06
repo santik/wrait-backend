@@ -405,6 +405,44 @@ describe('OpenAPI contract', () => {
     );
   });
 
+  it.each([
+    ['/api/transcribe?language=de', { language: 'de' }],
+    ['/api/transcribe', {}],
+  ])('empty transcript at %s matches the OpenAPI 422 response schema', async (url, extra) => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: { channels: [{ alternatives: [{ transcript: '' }], detected_language: 'en' }] },
+      }),
+    });
+    const req = mockMultipartTranscribeReq(
+      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      [
+        {
+          name: 'audio',
+          filename: 'recording.m4a',
+          contentType: 'audio/m4a',
+          body: Buffer.from('audio'),
+        },
+      ],
+      url,
+    );
+    const res = mockRes();
+
+    await transcribeHandler(req, res);
+
+    const { statusCode, body } = res as unknown as MockResShape;
+    expect(statusCode).toBe(422);
+    expect(body).toEqual({
+      error: 'Speech could not be recognized',
+      reason: 'speech_not_recognized',
+      ...extra,
+    });
+    const schema = getResponseSchema(spec, '/api/transcribe', 'post', 422);
+    expectToMatchSchema(schema, body);
+    expect(() => expectToMatchSchema(schema, { ...(body as object), reason: 'other' })).toThrow();
+  });
+
   it('invalid transcription language matches the OpenAPI 400 response schema', async () => {
     const req = mockMultipartTranscribeReq(
       { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
