@@ -6,5 +6,9 @@ export const config = { api: { bodyParser: false } };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const result = await handleTranscribe(req);
+  console.log('[transcribe] API response', {
+    status: result.status,
+    body: JSON.stringify(result.body),
+  });
   return json(res, result.body, result.status);
 }

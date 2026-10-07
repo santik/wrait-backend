@@ -8,3 +8,8 @@ node_modules
 CLAUDE.md
 changes
 src/generated/
+**/plan.md
+**/tasks.md
+**/review.md
+vercel-api.sh
+tests/giorgia_melonis.mp3
