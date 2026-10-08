@@ -398,12 +398,6 @@ export async function handleTranscribe(
     return { status: 502, body: errorResponse('Invalid response from upstream') };
   }
 
-  console.log('[transcribe] Deepgram full response', {
-    status: dgRes.status,
-    ok: dgRes.ok,
-    payload: JSON.stringify(payload),
-  });
-
   const deepgramChannel = getDeepgramChannel(payload, requestedLanguage);
 
   if (dgRes.ok) {

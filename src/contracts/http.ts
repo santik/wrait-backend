@@ -69,3 +69,17 @@ export function getRequestUrl(req: VercelRequest): URL {
   const host = typeof req.headers.host === 'string' ? req.headers.host : 'localhost';
   return new URL(req.url ?? '/', `https://${host}`);
 }
+
+export function logRequest(tag: string, req: VercelRequest): void {
+  const url = req.headers ? getRequestUrl(req) : new URL(req.url ?? '/', 'https://localhost');
+  const query = Object.fromEntries(url.searchParams.entries());
+  console.log(`[${tag}] request`, {
+    method: req.method,
+    path: url.pathname,
+    ...(Object.keys(query).length > 0 ? { query } : {}),
+  });
+}
+
+export function logResponse(tag: string, status: number): void {
+  console.log(`[${tag}] response`, { status });
+}
