@@ -176,8 +176,9 @@ export async function handleCleanup(
       },
       body: JSON.stringify({
         model: OPENAI_MODEL,
+        reasoning_effort: 'none',
         temperature: OPENAI_TEMPERATURE,
-        max_tokens: OPENAI_MAX_TOKENS,
+        max_completion_tokens: OPENAI_MAX_TOKENS,
         messages: [
           { role: 'system', content: buildSystemPrompt(parsedBody.language) },
           { role: 'user', content: buildUserPrompt(parsedBody.transcript.slice(0, TRANSCRIPT_MAX_LENGTH)) },

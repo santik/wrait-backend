@@ -390,7 +390,7 @@ describe('POST /api/cleanup', () => {
     expect(prisma.$executeRaw).toHaveBeenCalledOnce();
   });
 
-  it('sends correct model, temperature, and max_tokens to OpenAI', async () => {
+  it('sends correct model, reasoning_effort, temperature, and max_completion_tokens to OpenAI', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
 
     await handler(mockReq('POST', validHeaders, validBody), mockRes());
@@ -401,13 +401,15 @@ describe('POST /api/cleanup', () => {
 
     const sent = JSON.parse(init.body as string) as {
       model: string;
+      reasoning_effort: string;
       temperature: number;
-      max_tokens: number;
+      max_completion_tokens: number;
       messages: Array<{ role: string; content: string }>;
     };
     expect(sent.model).toBe('gpt-6-luna');
+    expect(sent.reasoning_effort).toBe('none');
     expect(sent.temperature).toBe(0.3);
-    expect(sent.max_tokens).toBe(1024);
+    expect(sent.max_completion_tokens).toBe(1024);
     expect(sent.messages[0].role).toBe('system');
     expect(sent.messages[0].content).toContain('en-US');
     expect(sent.messages[0].content).toContain('not a writing prompt, story prompt');
