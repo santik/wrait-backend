@@ -20,7 +20,7 @@ type CleanupSuccessBody = CleanupResponseBody & {
 
 const MAX_BODY_SIZE = 1 * 1024 * 1024;
 const OPENAI_TIMEOUT_MS = 25000;
-const OPENAI_MODEL = 'gpt-4o-mini';
+const OPENAI_MODEL = 'gpt-6-luna';
 const OPENAI_TEMPERATURE = 0.3;
 const OPENAI_MAX_TOKENS = 1024;
 const TRANSCRIPT_MIN_LENGTH = 10;
