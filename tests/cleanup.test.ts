@@ -405,7 +405,7 @@ describe('POST /api/cleanup', () => {
       max_tokens: number;
       messages: Array<{ role: string; content: string }>;
     };
-    expect(sent.model).toBe('gpt-4o-mini');
+    expect(sent.model).toBe('gpt-6-luna');
     expect(sent.temperature).toBe(0.3);
     expect(sent.max_tokens).toBe(1024);
     expect(sent.messages[0].role).toBe('system');
