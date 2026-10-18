@@ -153,9 +153,10 @@ paths:
       operationId: tagText
       summary: Classify text with tags
       description: |
-        Accepts a text and a list of tags, returns each tag with its probability
-        of being relevant to the text. Uses the TypeSafe AI Choice primitive for
-        classification. Stateless — no text, tags, or results are persisted.
+        Accepts a text and a list of tags, returns each tag with its independent
+        probability of being relevant to the text. Uses the TypeSafe AI Noul
+        primitive for per-tag scoring. Stateless — no text, tags, or results
+        are persisted.
       security:
         - ProxySecretHeader: []
       parameters:

@@ -151,9 +151,12 @@ export async function handleTag(
     tagCount: tags.length,
   });
 
-  const criteria: Record<string, null> = {};
+  const questions: Record<string, { type: string; instructions: string }> = {};
   for (const tag of tags) {
-    criteria[tag] = null;
+    questions[tag] = {
+      type: 'noul',
+      instructions: `Does the tag '${tag}' apply to this text?`,
+    };
   }
 
   const controller = new AbortController();
@@ -170,13 +173,7 @@ export async function handleTag(
       body: JSON.stringify({
         state: text,
         model: TYPESAFE_MODEL,
-        questions: {
-          tags: {
-            type: 'choice',
-            instructions: 'Which of the following tags best describes the content?',
-            criteria,
-          },
-        },
+        questions,
       }),
       signal: controller.signal,
     });
@@ -211,11 +208,9 @@ export async function handleTag(
     return { status: 502, body: errorResponse('upstream_error') };
   }
 
-  const probabilities = (
-    payload as { answers?: { tags?: { probabilities?: Record<string, number> } } }
-  )?.answers?.tags?.probabilities;
+  const answers = (payload as { answers?: Record<string, { noul?: number }> })?.answers;
 
-  if (!probabilities || typeof probabilities !== 'object') {
+  if (!answers || typeof answers !== 'object') {
     console.error('[tag] TypeSafe returned unexpected response shape:', {
       deviceId: ensuredDevice.deviceId,
     });
@@ -223,8 +218,8 @@ export async function handleTag(
   }
 
   const tagProbabilities = tags.map((tag) => {
-    const p = probabilities[tag];
-    const probability = typeof p === 'number' && p >= 0 && p <= 1 ? p : 0;
+    const noul = answers[tag]?.noul;
+    const probability = typeof noul === 'number' && noul >= 0 && noul <= 1 ? noul : 0;
     return { tag, probability };
   }).sort((a, b) => b.probability - a.probability);
 

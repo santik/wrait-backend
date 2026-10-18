@@ -78,19 +78,12 @@ const validBody = {
 const typesafeSuccess = {
   model: 'jev-1.13.0',
   answers: {
-    tags: {
-      type: 'choice',
-      choice: 'exercise',
-      probabilities: {
-        exercise: 0.72,
-        nature: 0.41,
-        mood: 0.55,
-        work: 0.02,
-        food: 0.03,
-        travel: 0.01,
-      },
-      confidence: 0.85,
-    },
+    exercise: { type: 'noul', noul: 0.95 },
+    nature: { type: 'noul', noul: 0.85 },
+    mood: { type: 'noul', noul: 0.80 },
+    work: { type: 'noul', noul: 0.05 },
+    food: { type: 'noul', noul: 0.03 },
+    travel: { type: 'noul', noul: 0.02 },
   },
   usage: { input_tokens: 100, output_tokens: 20 },
 };
@@ -310,7 +303,7 @@ describe('POST /api/tag', () => {
   it('returns 502 for unexpected response shape', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ answers: {} }),
+      json: () => Promise.resolve({ model: 'jev-1.13.0' }),
     });
     const req = mockReq('POST', validHeaders, validBody);
     const res = mockRes();
@@ -348,9 +341,9 @@ describe('POST /api/tag', () => {
     const body = result.body as { tags: Array<{ tag: string; probability: number }> };
     expect(body.tags).toHaveLength(6);
     expect(body.tags[0].tag).toBe('exercise');
-    expect(body.tags[0].probability).toBe(0.72);
-    expect(body.tags[1].tag).toBe('mood');
-    expect(body.tags[1].probability).toBe(0.55);
+    expect(body.tags[0].probability).toBe(0.95);
+    expect(body.tags[1].tag).toBe('nature');
+    expect(body.tags[1].probability).toBe(0.85);
 
     for (let i = 1; i < body.tags.length; i++) {
       expect(body.tags[i].probability).toBeLessThanOrEqual(body.tags[i - 1].probability);
@@ -374,14 +367,14 @@ describe('POST /api/tag', () => {
     const sentBody = JSON.parse(options.body as string) as {
       state: string;
       model: string;
-      questions: { tags: { type: string; instructions: string; criteria: Record<string, null> } };
+      questions: Record<string, { type: string; instructions: string }>;
     };
     expect(sentBody.state).toBe(validBody.text);
     expect(sentBody.model).toBe('jev-latest');
-    expect(sentBody.questions.tags.type).toBe('choice');
-    expect(Object.keys(sentBody.questions.tags.criteria)).toEqual(validBody.tags);
-    for (const val of Object.values(sentBody.questions.tags.criteria)) {
-      expect(val).toBeNull();
+    expect(Object.keys(sentBody.questions)).toEqual(validBody.tags);
+    for (const tag of validBody.tags) {
+      expect(sentBody.questions[tag].type).toBe('noul');
+      expect(sentBody.questions[tag].instructions).toContain(tag);
     }
   });
 
@@ -413,12 +406,8 @@ describe('POST /api/tag', () => {
       json: () =>
         Promise.resolve({
           answers: {
-            tags: {
-              type: 'choice',
-              choice: 'a',
-              probabilities: { a: 0.6, b: 0.4 },
-              confidence: 0.9,
-            },
+            a: { type: 'noul', noul: 0.6 },
+            b: { type: 'noul', noul: 0.4 },
           },
         }),
     });
@@ -430,21 +419,11 @@ describe('POST /api/tag', () => {
 
   it('accepts exactly 50 tags (maximum)', async () => {
     const tags = Array.from({ length: 50 }, (_, i) => `tag${i}`);
-    const probs: Record<string, number> = {};
-    for (const t of tags) probs[t] = 0.02;
+    const answers: Record<string, { type: string; noul: number }> = {};
+    for (const t of tags) answers[t] = { type: 'noul', noul: 0.02 };
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          answers: {
-            tags: {
-              type: 'choice',
-              choice: 'tag0',
-              probabilities: probs,
-              confidence: 0.5,
-            },
-          },
-        }),
+      json: () => Promise.resolve({ answers }),
     });
     const req = mockReq('POST', validHeaders, { text: 'hello', tags });
     const res = mockRes();
@@ -480,12 +459,8 @@ describe('POST /api/tag', () => {
       json: () =>
         Promise.resolve({
           answers: {
-            tags: {
-              type: 'choice',
-              choice: 'exercise',
-              probabilities: { exercise: 0.8, mood: 0.2 },
-              confidence: 0.9,
-            },
+            exercise: { type: 'noul', noul: 0.8 },
+            mood: { type: 'noul', noul: 0.2 },
           },
         }),
     });
@@ -509,12 +484,8 @@ describe('POST /api/tag', () => {
       json: () =>
         Promise.resolve({
           answers: {
-            tags: {
-              type: 'choice',
-              choice: 'a',
-              probabilities: { a: 1.5, b: -0.3 },
-              confidence: 0.5,
-            },
+            a: { type: 'noul', noul: 1.5 },
+            b: { type: 'noul', noul: -0.3 },
           },
         }),
     });
