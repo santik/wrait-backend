@@ -1,4 +1,5 @@
 {
+  "buildCommand": "prisma migrate deploy && vercel build",
   "devCommand": null,
   "regions": ["cdg1"],
   "functions": {

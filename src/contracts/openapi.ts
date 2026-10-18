@@ -23,3 +23,9 @@ export type TranscribeErrorResponse =
   | DailyRecordLimitExceededResponse
   | SpeechNotRecognizedResponse
   | UpstreamErrorResponse;
+
+export type TagHeaders = operations['tagText']['parameters']['header'];
+export type TagRequestBody =
+  operations['tagText']['requestBody']['content']['application/json'];
+export type TagResponseBody = JsonContent<operations['tagText']['responses'][200]>;
+export type TagErrorResponse = ErrorResponse | DailyRecordLimitExceededResponse;

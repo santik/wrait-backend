@@ -582,13 +582,14 @@ describe('POST /api/cleanup', () => {
   it('allows a request after the UTC reset when quota was full before midnight', async () => {
     vi.useFakeTimers();
     mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
-    vi.mocked(prisma.callCount.findUnique).mockImplementation((args: any) => {
-      const date = args.where.deviceId_date_type.date as Date;
+    vi.mocked(prisma.callCount.findUnique).mockImplementation(((args: Record<string, unknown>) => {
+      const where = args.where as { deviceId_date_type: { date: Date } };
+      const date = where.deviceId_date_type.date;
       if (date.toISOString() === '2026-05-21T00:00:00.000Z') {
         return Promise.resolve({ count: 3 } as never) as never;
       }
       return Promise.resolve(null) as never;
-    });
+    }) as typeof prisma.callCount.findUnique);
 
     vi.setSystemTime(new Date('2026-05-21T23:59:59.000Z'));
     const beforeResetRes = mockRes();
