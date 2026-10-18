@@ -1,4 +1,5 @@
 {
+  "installCommand": "npm install && prisma migrate deploy",
   "devCommand": null,
   "regions": ["cdg1"],
   "functions": {

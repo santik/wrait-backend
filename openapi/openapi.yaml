@@ -148,6 +148,52 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '504':
           $ref: '#/components/responses/UpstreamTimeout'
+  /api/tag:
+    post:
+      operationId: tagText
+      summary: Classify text with tags
+      description: |
+        Accepts a text and a list of tags, returns each tag with its independent
+        probability of being relevant to the text. Uses the TypeSafe AI Noul
+        primitive for per-tag scoring. Stateless — no text, tags, or results
+        are persisted.
+      security:
+        - ProxySecretHeader: []
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagRequest'
+      responses:
+        '200':
+          description: Classification completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/DailyRecordLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '502':
+          description: Upstream service error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
 components:
   securitySchemes:
     ProxySecretHeader:
@@ -536,6 +582,52 @@ components:
           allOf:
             - $ref: '#/components/schemas/RecordQuota'
           description: Current cleanup quota for the device on the active UTC day. Omitted if quota lookup fails after transcription succeeds.
+    TagRequest:
+      type: object
+      required:
+        - text
+        - tags
+      additionalProperties: false
+      properties:
+        text:
+          type: string
+          minLength: 1
+          description: Text to classify. Max 10,000 UTF-8 bytes.
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+          minItems: 2
+          maxItems: 50
+          uniqueItems: true
+          description: List of 2–50 unique non-empty tag strings (max 100 chars each).
+    TagResponse:
+      type: object
+      required:
+        - tags
+      properties:
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/TagProbability'
+        quota:
+          allOf:
+            - $ref: '#/components/schemas/RecordQuota'
+          description: Updated tag quota after the successful classification is counted. Omitted if quota persistence fails.
+    TagProbability:
+      type: object
+      required:
+        - tag
+        - probability
+      properties:
+        tag:
+          type: string
+        probability:
+          type: number
+          minimum: 0
+          maximum: 1
     UpstreamErrorResponse:
       type: object
       additionalProperties: true
