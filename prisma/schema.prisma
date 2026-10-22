@@ -24,6 +24,18 @@ model CallCount {
   @@map("call_counts")
 }
 
+model RegistrationAttempt {
+  ip    String
+  date  DateTime @db.Date
+  count Int      @default(1)
+
+  @@unique([ip, date])
+  // Backs the retention prune (DELETE WHERE date < cutoff); the composite
+  // unique index above can't serve a date-only range scan.
+  @@index([date])
+  @@map("registration_attempts")
+}
+
 enum CallCountType {
   TRANSCRIPTION
   CLEANUP

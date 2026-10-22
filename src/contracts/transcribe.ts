@@ -18,7 +18,7 @@ import {
 import {
   errorResponse,
   getRequestUrl,
-  requireDeviceId,
+  requireQuotaDeviceId,
   requirePostMethod,
   requireProxySecret,
 } from './http.js';
@@ -318,7 +318,7 @@ export async function handleTranscribe(
   const authError = requireProxySecret(req);
   if (authError) return authError;
 
-  const device = requireDeviceId(req);
+  const device = requireQuotaDeviceId(req);
   if ('status' in device) return device;
 
   const requestContentType = getMultipartContentType(req);

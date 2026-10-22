@@ -7,7 +7,7 @@ import { buildRecordQuota, type RecordQuota, verifyDailyRecordQuota } from '../l
 import {
   errorResponse,
   readRequestBody,
-  requireDeviceId,
+  requireQuotaDeviceId,
   requirePostMethod,
   requireProxySecret,
 } from './http.js';
@@ -103,7 +103,7 @@ export async function handleCleanup(
   const authError = requireProxySecret(req);
   if (authError) return authError;
 
-  const device = requireDeviceId(req);
+  const device = requireQuotaDeviceId(req);
   if ('status' in device) return device;
 
   if (!process.env.OPENAI_API_KEY) {

@@ -9,6 +9,7 @@ import cleanupHandler from '../api/cleanup.js';
 import { ALLOWED_LANGUAGES } from '../src/lib/allowedLanguages.js';
 import { TRANSCRIPTION_LANGUAGES } from '../src/generated/transcriptionLanguages.js';
 import { prisma } from '../src/lib/prisma.js';
+import { tokenFor } from './helpers/deviceToken.js';
 
 vi.mock('../src/lib/prisma.js', () => ({
   prisma: {
@@ -20,6 +21,7 @@ vi.mock('../src/lib/prisma.js', () => ({
       findUnique: vi.fn(),
     },
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
   },
 }));
 
@@ -268,6 +270,7 @@ describe('OpenAPI contract', () => {
     } as never);
     vi.mocked(prisma.callCount.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([{ count: 1 }] as never);
   });
 
   afterEach(() => {
@@ -314,6 +317,51 @@ describe('OpenAPI contract', () => {
     );
   });
 
+  it('register Mode A response includes a token and matches the 201 schema', async () => {
+    process.env.DEVICE_TOKEN_SECRET = 'test-device-token-secret';
+    const req = mockRegisterReq('POST', {
+      'x-proxy-secret': 'test-secret',
+      'x-device-id': 'a'.repeat(64),
+    });
+    const res = mockRes();
+
+    await registerHandler(req, res);
+
+    const body = (res as unknown as MockResShape).body as { token?: string };
+    expect(typeof body.token).toBe('string');
+    expectToMatchSchema(getResponseSchema(spec, '/api/register', 'post', 201), body);
+  });
+
+  it('register rate-limit error matches the OpenAPI 429 response schema', async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([{ count: 999 }] as never);
+    const req = mockRegisterReq('POST', {
+      'x-proxy-secret': 'test-secret',
+      'x-device-id': 'a'.repeat(64),
+    });
+    const res = mockRes();
+
+    await registerHandler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(429);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/register', 'post', 429),
+      (res as unknown as MockResShape).body,
+    );
+  });
+
+  it('transcribe missing-token error matches the OpenAPI 403 response schema', async () => {
+    const req = mockRegisterReq('POST', { 'x-proxy-secret': 'test-secret' });
+    const res = mockRes();
+
+    await transcribeHandler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(403);
+    expectToMatchSchema(
+      getResponseSchema(spec, '/api/transcribe', 'post', 403),
+      (res as unknown as MockResShape).body,
+    );
+  });
+
   it('transcribe success matches the OpenAPI 200 response schema', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
@@ -330,7 +378,7 @@ describe('OpenAPI contract', () => {
     });
 
     const req = mockMultipartTranscribeReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [
         {
           name: 'audio',
@@ -382,7 +430,7 @@ describe('OpenAPI contract', () => {
       }),
     });
     const req = mockMultipartTranscribeReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [
         {
           name: 'audio',
@@ -416,7 +464,7 @@ describe('OpenAPI contract', () => {
       }),
     });
     const req = mockMultipartTranscribeReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [
         {
           name: 'audio',
@@ -445,7 +493,7 @@ describe('OpenAPI contract', () => {
 
   it('invalid transcription language matches the OpenAPI 400 response schema', async () => {
     const req = mockMultipartTranscribeReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [
         {
           name: 'audio',
@@ -474,7 +522,7 @@ describe('OpenAPI contract', () => {
     });
 
     const req = mockMultipartTranscribeReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [
         {
           name: 'audio',
@@ -501,7 +549,7 @@ describe('OpenAPI contract', () => {
     vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 6 } as never);
 
     const req = mockMultipartTranscribeReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [
         {
           name: 'audio',
@@ -532,7 +580,7 @@ describe('OpenAPI contract', () => {
       'POST',
       {
         'x-proxy-secret': 'test-secret',
-        'x-device-id': 'a'.repeat(64),
+        'x-device-token': tokenFor('a'.repeat(64)),
         'content-type': 'application/json',
       },
       { transcript: 'um hello world so like', language: 'en-US' },
@@ -553,7 +601,7 @@ describe('OpenAPI contract', () => {
       'POST',
       {
         'x-proxy-secret': 'test-secret',
-        'x-device-id': 'a'.repeat(64),
+        'x-device-token': tokenFor('a'.repeat(64)),
         'content-type': 'text/plain',
       },
       { transcript: 'um hello world so like', language: 'en-US' },
@@ -578,7 +626,7 @@ describe('OpenAPI contract', () => {
       'POST',
       {
         'x-proxy-secret': 'test-secret',
-        'x-device-id': 'a'.repeat(64),
+        'x-device-token': tokenFor('a'.repeat(64)),
         'content-type': 'application/json',
       },
       { transcript: 'um hello world so like', language: 'en-US' },
