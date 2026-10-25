@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import handler from '../api/cleanup.js';
 import { prisma } from '../src/lib/prisma.js';
+import { tokenFor } from './helpers/deviceToken.js';
 
 vi.mock('../src/lib/prisma.js', () => ({
   prisma: {
@@ -66,7 +67,7 @@ function mockReq(
 
 const validHeaders = {
   'x-proxy-secret': 'test-secret',
-  'x-device-id': 'a'.repeat(64),
+  'x-device-token': tokenFor('a'.repeat(64)),
   'content-type': 'application/json',
 };
 
@@ -129,7 +130,7 @@ describe('POST /api/cleanup', () => {
   it('rejects wrong proxy secret with 401', async () => {
     const req = mockReq(
       'POST',
-      { 'x-proxy-secret': 'wrong', 'x-device-id': 'a'.repeat(64), 'content-type': 'application/json' },
+      { 'x-proxy-secret': 'wrong', 'x-device-token': tokenFor('a'.repeat(64)), 'content-type': 'application/json' },
       validBody,
     );
     const res = mockRes();
@@ -141,22 +142,10 @@ describe('POST /api/cleanup', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('rejects missing device ID with 400', async () => {
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' }, validBody);
-    const res = mockRes();
-
-    await handler(req, res);
-
-    const r = res as unknown as MockResShape;
-    expect(r.statusCode).toBe(400);
-    expect(r.body).toEqual({ error: 'Invalid device ID' });
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects invalid device ID format with 400', async () => {
+  it('rejects missing device token with 403', async () => {
     const req = mockReq(
       'POST',
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'abc123', 'content-type': 'application/json' },
+      { 'x-proxy-secret': 'test-secret', 'content-type': 'application/json' },
       validBody,
     );
     const res = mockRes();
@@ -164,9 +153,55 @@ describe('POST /api/cleanup', () => {
     await handler(req, res);
 
     const r = res as unknown as MockResShape;
-    expect(r.statusCode).toBe(400);
-    expect(r.body).toEqual({ error: 'Invalid device ID' });
+    expect(r.statusCode).toBe(403);
+    expect(r.body).toEqual({ error: 'Invalid or missing device token' });
     expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a raw X-Device-Id without a token and a forged token with 403', async () => {
+    for (const extra of <Record<string, string>[]>[
+      { 'x-device-id': 'a'.repeat(64) },
+      { 'x-device-token': 'forged.token' },
+    ]) {
+      const req = mockReq(
+        'POST',
+        { 'x-proxy-secret': 'test-secret', 'content-type': 'application/json', ...extra },
+        validBody,
+      );
+      const res = mockRes();
+      await handler(req, res);
+      expect((res as unknown as MockResShape).statusCode).toBe(403);
+    }
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+  });
+
+  it('keys quota on the device id carried by the token', async () => {
+    const otherId = 'b'.repeat(64);
+    vi.mocked(prisma.device.upsert).mockResolvedValue({
+      deviceId: otherId,
+      registeredAt: new Date(),
+      dailyRecordLimit: null,
+    } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 99 } as never);
+    const req = mockReq(
+      'POST',
+      { ...validHeaders, 'x-device-token': tokenFor(otherId), 'x-device-id': 'c'.repeat(64) },
+      validBody,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(429);
+    expect(prisma.device.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { deviceId: otherId } }),
+    );
+    expect(prisma.callCount.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { deviceId_date_type: expect.objectContaining({ deviceId: otherId }) },
+      }),
+    );
   });
 
   it('returns 500 when OPENAI_API_KEY is not set', async () => {
@@ -185,7 +220,7 @@ describe('POST /api/cleanup', () => {
   it('rejects wrong Content-Type with 400', async () => {
     const req = mockReq(
       'POST',
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64), 'content-type': 'text/plain' },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)), 'content-type': 'text/plain' },
       validBody,
     );
     const res = mockRes();

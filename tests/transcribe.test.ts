@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import handler from '../api/transcribe.js';
 import { prisma } from '../src/lib/prisma.js';
+import { tokenFor } from './helpers/deviceToken.js';
 
 vi.mock('../src/lib/prisma.js', () => ({
   prisma: {
@@ -201,32 +202,62 @@ describe('POST /api/transcribe', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('rejects missing device ID with 400', async () => {
+  it('rejects missing device token with 403', async () => {
     const req = mockReq('POST', { 'x-proxy-secret': 'test-secret' });
     const res = mockRes();
 
     await handler(req, res);
 
     const r = res as unknown as MockResShape;
-    expect(r.statusCode).toBe(400);
-    expect(r.body).toEqual({ error: 'Invalid device ID' });
+    expect(r.statusCode).toBe(403);
+    expect(r.body).toEqual({ error: 'Invalid or missing device token' });
     expect(mockFetch).not.toHaveBeenCalled();
     expect(prisma.device.upsert).not.toHaveBeenCalled();
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it('rejects invalid device ID format with 400', async () => {
-    const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', 'x-device-id': 'abc123' });
+  it('rejects a raw X-Device-Id without a token and a forged token with 403', async () => {
+    for (const extra of <Record<string, string>[]>[
+      { 'x-device-id': 'a'.repeat(64) },
+      { 'x-device-token': 'forged.token' },
+    ]) {
+      const req = mockReq('POST', { 'x-proxy-secret': 'test-secret', ...extra });
+      const res = mockRes();
+      await handler(req, res);
+      expect((res as unknown as MockResShape).statusCode).toBe(403);
+    }
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+  });
+
+  it('keys quota on the device id carried by the token', async () => {
+    const otherId = 'b'.repeat(64);
+    vi.mocked(prisma.device.upsert).mockResolvedValue({
+      deviceId: otherId,
+      registeredAt: new Date(),
+      dailyRecordLimit: null,
+    } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 99 } as never);
+    const req = mockMultipartReq(
+      {
+        'x-proxy-secret': 'test-secret',
+        'x-device-token': tokenFor(otherId),
+        'x-device-id': 'c'.repeat(64),
+      },
+      [audioPart(Buffer.from('fake-audio-bytes'))],
+    );
     const res = mockRes();
 
     await handler(req, res);
 
-    const r = res as unknown as MockResShape;
-    expect(r.statusCode).toBe(400);
-    expect(r.body).toEqual({ error: 'Invalid device ID' });
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(prisma.device.upsert).not.toHaveBeenCalled();
-    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+    expect((res as unknown as MockResShape).statusCode).toBe(429);
+    expect(prisma.device.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { deviceId: otherId } }),
+    );
+    expect(prisma.callCount.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { deviceId_date_type: expect.objectContaining({ deviceId: otherId }) },
+      }),
+    );
   });
 
   it('upserts device and continues', async () => {
@@ -235,7 +266,7 @@ describe('POST /api/transcribe', () => {
       json: async () => deepgramSuccess,
     });
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('fake-audio-bytes'))],
     );
     const res = mockRes();
@@ -262,7 +293,7 @@ describe('POST /api/transcribe', () => {
     vi.mocked(prisma.device.upsert).mockRejectedValue(new Error('DB down'));
     const req = mockReq('POST', {
       'x-proxy-secret': 'test-secret',
-      'x-device-id': 'a'.repeat(64),
+      'x-device-token': tokenFor('a'.repeat(64)),
       'content-type': 'multipart/form-data; boundary=test-boundary',
     });
     const res = mockRes();
@@ -283,7 +314,7 @@ describe('POST /api/transcribe', () => {
     vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 6 } as never);
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('fake-audio-bytes'))],
     );
     const res = mockRes();
@@ -313,7 +344,7 @@ describe('POST /api/transcribe', () => {
 
     const audio = Buffer.from('fake-audio-bytes');
     const deviceId = 'a'.repeat(64);
-    const req = mockMultipartReq({ 'x-proxy-secret': 'test-secret', 'x-device-id': deviceId }, [
+    const req = mockMultipartReq({ 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor(deviceId) }, [
       audioPart(audio, 'audio/mp4'),
     ]);
     const res = mockRes();
@@ -359,7 +390,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('bad-audio'))],
     );
     const res = mockRes();
@@ -390,7 +421,7 @@ describe('POST /api/transcribe', () => {
       });
 
       const req = mockMultipartReq(
-        { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+        { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
         [audioPart(Buffer.from('audio'))],
         `/api/transcribe?language=${queryLanguage}`,
       );
@@ -415,7 +446,7 @@ describe('POST /api/transcribe', () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
       '/api/transcribe?language=it',
     );
@@ -446,7 +477,7 @@ describe('POST /api/transcribe', () => {
     '/api/transcribe?language=it%26detect_language%3Dtrue',
   ])('rejects invalid language query in %s before persistence', async (url) => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
       url,
     );
@@ -477,7 +508,7 @@ describe('POST /api/transcribe', () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
       '/api/transcribe?model=custom&language=nl&detect_language=false&utterances=true&filler_words=false&punctuate=false&smart_format=false',
     );
@@ -492,7 +523,7 @@ describe('POST /api/transcribe', () => {
   });
 
   describe('empty transcript', () => {
-    const headers = { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) };
+    const headers = { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) };
     const emptyPayload = (transcript: string) => ({
       results: { channels: [{ alternatives: [{ transcript }], detected_language: 'en' }] },
     });
@@ -549,7 +580,7 @@ describe('POST /api/transcribe', () => {
     mockFetch.mockResolvedValue({ ok: false, json: async () => dgError });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
       '/api/transcribe?language=af',
     );
@@ -567,7 +598,7 @@ describe('POST /api/transcribe', () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
     );
     const res = mockRes();
@@ -586,7 +617,7 @@ describe('POST /api/transcribe', () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => deepgramSuccess });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'), 'audio/webm')],
     );
     const res = mockRes();
@@ -603,7 +634,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects requests exceeding size limit with 413', async () => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.alloc(26 * 1024 * 1024))],
     );
     const res = mockRes();
@@ -625,7 +656,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
     );
     const res = mockRes();
@@ -642,7 +673,7 @@ describe('POST /api/transcribe', () => {
     mockFetch.mockRejectedValue(new Error('Network error'));
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
     );
     const res = mockRes();
@@ -664,7 +695,7 @@ describe('POST /api/transcribe', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('fake-audio-bytes'))],
     );
     const res = mockRes();
@@ -686,7 +717,7 @@ describe('POST /api/transcribe', () => {
       .mockResolvedValueOnce(1 as never);
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('fake-audio-bytes'))],
     );
     const res = mockRes();
@@ -706,7 +737,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
     );
     const res = mockRes();
@@ -726,7 +757,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
       '/api/transcribe?language=it',
     );
@@ -750,7 +781,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
     );
     const res = mockRes();
@@ -772,7 +803,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('fake-audio-bytes'))],
     );
     const res = mockRes();
@@ -792,7 +823,7 @@ describe('POST /api/transcribe', () => {
     });
 
     const makeReq = () =>
-      mockMultipartReq({ 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) }, [
+      mockMultipartReq({ 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) }, [
         audioPart(Buffer.from('fake-audio-bytes')),
       ]);
 
@@ -815,7 +846,7 @@ describe('POST /api/transcribe', () => {
       'POST',
       {
         'x-proxy-secret': 'test-secret',
-        'x-device-id': 'a'.repeat(64),
+        'x-device-token': tokenFor('a'.repeat(64)),
         'content-type': 'audio/mp4',
       },
       Buffer.from('audio'),
@@ -835,7 +866,7 @@ describe('POST /api/transcribe', () => {
       'POST',
       {
         'x-proxy-secret': 'test-secret',
-        'x-device-id': 'a'.repeat(64),
+        'x-device-token': tokenFor('a'.repeat(64)),
         'content-type': 'multipart/form-data',
       },
       Buffer.from('audio'),
@@ -855,7 +886,7 @@ describe('POST /api/transcribe', () => {
       'POST',
       {
         'x-proxy-secret': 'test-secret',
-        'x-device-id': 'a'.repeat(64),
+        'x-device-token': tokenFor('a'.repeat(64)),
         'content-type': 'multipart/form-data; boundary=',
       },
       Buffer.from('audio'),
@@ -872,7 +903,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects multipart requests with an overly long boundary parameter', async () => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'))],
       '/api/transcribe',
       'a'.repeat(71),
@@ -889,7 +920,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects multipart requests without an audio file', async () => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [],
     );
     const res = mockRes();
@@ -904,7 +935,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects unexpected multipart form fields', async () => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [{ name: 'note', body: 'not audio' }],
     );
     const res = mockRes();
@@ -919,7 +950,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects multipart requests with multiple audio files', async () => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio-1')), audioPart(Buffer.from('audio-2'), 'audio/wav')],
     );
     const res = mockRes();
@@ -934,7 +965,7 @@ describe('POST /api/transcribe', () => {
 
   it('rejects unsupported audio file content types with 400', async () => {
     const req = mockMultipartReq(
-      { 'x-proxy-secret': 'test-secret', 'x-device-id': 'a'.repeat(64) },
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)) },
       [audioPart(Buffer.from('audio'), 'application/octet-stream')],
     );
     const res = mockRes();

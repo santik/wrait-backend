@@ -1,11 +1,6 @@
 import { CallCountType } from '@prisma/client';
 import { prisma } from './prisma.js';
-
-const TRANSIENT_DB_ERROR_PATTERNS = ['timeout', 'timed out', 'connection', 'econn', 'too many clients'];
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+import { isTransientDbError, RETRY_DELAYS_MS, sleep } from './dbRetry.js';
 
 export function getUTCDayBucket(): Date {
   const today = new Date();
@@ -21,11 +16,9 @@ export async function incrementCallCount(
   type: CallCountType,
   label: string,
 ): Promise<boolean> {
-  const retryDelaysMs = [0, 25, 75];
-
-  for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
-    if (retryDelaysMs[attempt] > 0) {
-      await sleep(retryDelaysMs[attempt]);
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (RETRY_DELAYS_MS[attempt] > 0) {
+      await sleep(RETRY_DELAYS_MS[attempt]);
     }
 
     try {
@@ -38,9 +31,8 @@ export async function incrementCallCount(
       return true;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      const normalizedMessage = errorMessage.toLowerCase();
-      const isTransient = TRANSIENT_DB_ERROR_PATTERNS.some((p) => normalizedMessage.includes(p));
-      const isLastAttempt = attempt === retryDelaysMs.length - 1;
+      const isTransient = isTransientDbError(error);
+      const isLastAttempt = attempt === RETRY_DELAYS_MS.length - 1;
 
       if (!isTransient || isLastAttempt) {
         console.error(`[${label}] Failed to store call count:`, {
