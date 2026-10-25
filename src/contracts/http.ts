@@ -1,6 +1,8 @@
-import type { VercelRequest } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
 import { verifyDeviceToken } from '../lib/deviceToken.js';
 import { DEVICE_ID_REGEX } from '../lib/deviceId.js';
+import { json } from '../lib/response.js';
 import type { ErrorResponse } from './openapi.js';
 
 export type OperationResult<TSuccess, TError = ErrorResponse> = {
@@ -90,6 +92,68 @@ export function requireQuotaDeviceId(
   return { status: 403, body: errorResponse('Invalid or missing device token') };
 }
 
+// Validates the device, mapping any ensureDevice failure to a uniform 500 with
+// the per-endpoint log label. Every quota handler needs exactly this.
+export async function ensureDeviceOrError(
+  deviceId: string,
+  label: string,
+): Promise<EnsuredDevice | OperationResult<never>> {
+  try {
+    return await ensureDevice(deviceId);
+  } catch (error) {
+    console.error(`[${label}] Failed to validate device:`, {
+      error: error instanceof Error ? error.message : String(error),
+      deviceId,
+    });
+    return { status: 500, body: errorResponse('Internal server error') };
+  }
+}
+
+// Reads a JSON request body: the Content-Type guard, the size-bounded read, and
+// the parse, which cleanup and tag share verbatim. The parsed value is wrapped
+// so callers discriminate on `status` without colliding with a parsed object
+// that happens to carry its own `status` field.
+export async function readJsonBody(
+  req: VercelRequest,
+  maxSize: number,
+): Promise<{ value: unknown } | OperationResult<never>> {
+  const contentType = req.headers['content-type'];
+  if (typeof contentType !== 'string' || !contentType.startsWith('application/json')) {
+    return { status: 400, body: errorResponse('Invalid Content-Type') };
+  }
+
+  const requestBody = await readRequestBody(req, maxSize);
+  if ('status' in requestBody) return requestBody;
+
+  try {
+    return { value: JSON.parse(requestBody.body.toString('utf-8')) as unknown };
+  } catch {
+    return { status: 400, body: errorResponse('Invalid JSON body') };
+  }
+}
+
+// Maps a non-OK status or unparseable body to a uniform 502, otherwise returns
+// the parsed JSON (wrapped, same reason as readJsonBody). Shared by the handlers
+// that collapse every upstream failure to `upstream_error`; transcribe forwards
+// the raw upstream body instead and keeps its own handling.
+export async function readUpstreamJson(
+  res: Response,
+  label: string,
+  deviceId: string,
+): Promise<{ payload: unknown } | OperationResult<never>> {
+  if (!res.ok) {
+    console.error(`[${label}] Upstream returned non-OK status:`, { status: res.status, deviceId });
+    return { status: 502, body: errorResponse('upstream_error') };
+  }
+
+  try {
+    return { payload: await res.json() };
+  } catch {
+    console.error(`[${label}] Upstream returned invalid JSON:`, { deviceId });
+    return { status: 502, body: errorResponse('upstream_error') };
+  }
+}
+
 export async function readRequestBody(
   req: VercelRequest,
   maxSize: number,
@@ -126,4 +190,18 @@ export function logRequest(tag: string, req: VercelRequest): void {
 
 export function logResponse(tag: string, status: number): void {
   console.log(`[${tag}] response`, { status });
+}
+
+// Wraps an operation handler as a Vercel request handler, applying the common
+// request/response logging and JSON serialization every endpoint shares.
+export function createOperationHandler(
+  tag: string,
+  handle: (req: VercelRequest) => Promise<OperationResult<unknown, unknown>>,
+): (req: VercelRequest, res: VercelResponse) => Promise<void> {
+  return async (req, res) => {
+    logRequest(tag, req);
+    const result = await handle(req);
+    logResponse(tag, result.status);
+    json(res, result.body, result.status);
+  };
 }

@@ -2,20 +2,15 @@ import { once } from 'node:events';
 import type { VercelRequest } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import busboy from 'busboy';
-import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
-import {
-  buildRecordQuota,
-  getEffectiveQuotaLimit,
-  getSuccessfulCallCount,
-  type RecordQuota,
-  verifyDailyRecordQuota,
-} from '../lib/quota.js';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
+import { loadCleanupQuotaSafe, type RecordQuota, verifyDailyRecordQuota } from '../lib/quota.js';
 import {
   TRANSCRIPTION_LANGUAGES,
   type TranscriptionLanguage,
 } from '../generated/transcriptionLanguages.js';
 import {
+  ensureDeviceOrError,
   errorResponse,
   getRequestUrl,
   requireQuotaDeviceId,
@@ -64,9 +59,7 @@ type MultipartAudioUpload = {
   requestSize: number;
 };
 
-function getMultipartContentType(
-  req: VercelRequest,
-): { contentType: string; boundary: string } | null {
+function getMultipartContentType(req: VercelRequest): string | null {
   const contentType = req.headers['content-type'];
   if (typeof contentType !== 'string') {
     return null;
@@ -96,7 +89,7 @@ function getMultipartContentType(
     return null;
   }
 
-  return { contentType, boundary };
+  return contentType;
 }
 
 function getSupportedAudioContentType(contentType: string): SupportedAudioContentType | null {
@@ -186,62 +179,60 @@ async function parseMultipartAudioUpload(
     });
   });
 
-  return await new Promise<MultipartAudioUpload | OperationResult<never>>(async (resolve) => {
-    let settled = false;
-
-    const finish = (result: MultipartAudioUpload | OperationResult<never>) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
-
+  // A resolved Promise ignores later resolve() calls, so whichever of the
+  // parser events or the feed loop finishes first wins — no manual settle guard
+  // needed. The feed runs as a self-invoking async block so the executor itself
+  // stays synchronous (no async-Promise-executor swallowing throws).
+  return new Promise<MultipartAudioUpload | OperationResult<never>>((resolve) => {
     parser.on('error', (error) => {
       console.error('[transcribe] Invalid multipart body:', error);
-      finish(pendingError ?? { status: 400, body: errorResponse('Invalid multipart form data') });
+      resolve(pendingError ?? { status: 400, body: errorResponse('Invalid multipart form data') });
     });
 
     parser.on('close', () => {
       if (pendingError) {
-        finish(pendingError);
+        resolve(pendingError);
         return;
       }
 
       if (audioFileCount === 0 || !audioContentType || audioSize === 0) {
-        finish({ status: 400, body: errorResponse('Missing audio file') });
+        resolve({ status: 400, body: errorResponse('Missing audio file') });
         return;
       }
 
-      finish({
+      resolve({
         body: Buffer.concat(audioChunks),
         contentType: audioContentType,
         requestSize,
       });
     });
 
-    try {
-      for await (const chunk of req) {
-        const bufferChunk = chunk as Buffer;
-        requestSize += bufferChunk.length;
+    void (async () => {
+      try {
+        for await (const chunk of req) {
+          const bufferChunk = chunk as Buffer;
+          requestSize += bufferChunk.length;
 
-        if (requestSize > MAX_REQUEST_SIZE) {
-          aborted = true;
-          setError({ status: 413, body: errorResponse('Request too large') });
-          parser.destroy();
-          break;
+          if (requestSize > MAX_REQUEST_SIZE) {
+            aborted = true;
+            setError({ status: 413, body: errorResponse('Request too large') });
+            parser.destroy();
+            break;
+          }
+
+          if (!parser.write(bufferChunk)) {
+            await once(parser, 'drain');
+          }
         }
 
-        if (!parser.write(bufferChunk)) {
-          await once(parser, 'drain');
+        if (!aborted) {
+          parser.end();
         }
+      } catch (error) {
+        console.error('[transcribe] Invalid multipart body:', error);
+        resolve({ status: 400, body: errorResponse('Invalid multipart form data') });
       }
-
-      if (!aborted) {
-        parser.end();
-      }
-    } catch (error) {
-      console.error('[transcribe] Invalid multipart body:', error);
-      finish({ status: 400, body: errorResponse('Invalid multipart form data') });
-    }
+    })();
   });
 }
 
@@ -279,8 +270,8 @@ function buildDeepgramSearch(language: string | null): string {
     searchParams.set('language', language);
   }
 
-  const search = searchParams.toString();
-  return search ? `?${search}` : '';
+  // DEFAULT_TRANSCRIBE_QUERY always contributes keys, so the query is never empty.
+  return `?${searchParams.toString()}`;
 }
 
 function getDeepgramChannel(
@@ -331,63 +322,55 @@ export async function handleTranscribe(
   if (!languageResult.ok) return languageResult.error;
   const requestedLanguage = languageResult.value;
 
-  let ensuredDevice: EnsuredDevice;
-  try {
-    ensuredDevice = await ensureDevice(device.deviceId);
-  } catch (error) {
-    console.error('[transcribe] Failed to validate device:', {
-      error: error instanceof Error ? error.message : String(error),
-      deviceId: device.deviceId,
-    });
-    return { status: 500, body: errorResponse('Internal server error') };
-  }
+  const ensuredDevice = await ensureDeviceOrError(device.deviceId, 'transcribe');
+  if ('status' in ensuredDevice) return ensuredDevice;
 
+  const dayBucket = getUTCDayBucket();
   const quotaCheck = await verifyDailyRecordQuota(
     ensuredDevice.deviceId,
     ensuredDevice.dailyRecordLimit,
     CallCountType.TRANSCRIPTION,
     'transcribe',
+    dayBucket,
   );
   if (!quotaCheck.allowed) {
     return { status: quotaCheck.status, body: quotaCheck.body };
   }
 
-  const audioUpload = await parseMultipartAudioUpload(req, requestContentType.contentType);
+  const audioUpload = await parseMultipartAudioUpload(req, requestContentType);
   if ('status' in audioUpload) return audioUpload;
 
   console.log('[transcribe] Request received', {
     contentLength: audioUpload.requestSize,
-    requestContentType: requestContentType.contentType,
+    requestContentType,
     audioContentType: audioUpload.contentType,
     hasSecret: !!req.headers['x-proxy-secret'],
   });
 
   const search = buildDeepgramSearch(requestedLanguage);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEEPGRAM_TIMEOUT_MS);
-
   console.log('[transcribe] Forwarding to Deepgram', { search });
 
   let dgRes: Response;
   try {
-    dgRes = await fetch(`https://api.deepgram.com/v1/listen${search}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-        'Content-Type': audioUpload.contentType,
+    dgRes = await fetchWithTimeout(
+      `https://api.deepgram.com/v1/listen${search}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+          'Content-Type': audioUpload.contentType,
+        },
+        body: new Uint8Array(audioUpload.body),
       },
-      body: new Uint8Array(audioUpload.body),
-      signal: controller.signal,
-    });
+      DEEPGRAM_TIMEOUT_MS,
+    );
   } catch (error) {
     console.error('[transcribe] Fetch error:', error);
     if (error instanceof Error && error.name === 'AbortError') {
       return { status: 504, body: errorResponse('Deepgram request timeout') };
     }
     return { status: 502, body: errorResponse('Failed to reach Deepgram') };
-  } finally {
-    clearTimeout(timeout);
   }
 
   let payload: unknown;
@@ -398,64 +381,40 @@ export async function handleTranscribe(
     return { status: 502, body: errorResponse('Invalid response from upstream') };
   }
 
+  if (!dgRes.ok) {
+    return { status: 502, body: payload as UpstreamErrorResponse };
+  }
+
   const deepgramChannel = getDeepgramChannel(payload, requestedLanguage);
-
-  if (dgRes.ok) {
-    if (!deepgramChannel) {
-      console.error('[transcribe] Unexpected Deepgram response shape');
-      return { status: 502, body: errorResponse('Invalid response from upstream') };
-    }
-    if (deepgramChannel.transcript.trim() === '') {
-      console.warn('[transcribe] Empty transcript from Deepgram', {
-        language: requestedLanguage ?? 'auto',
-      });
-      return {
-        status: 422,
-        body: {
-          error: 'Speech could not be recognized',
-          reason: 'speech_not_recognized',
-          ...(requestedLanguage ? { language: requestedLanguage } : {}),
-        },
-      };
-    }
-    await incrementCallCount(
-      device.deviceId,
-      getUTCDayBucket(),
-      CallCountType.TRANSCRIPTION,
-      'transcribe',
-    );
+  if (!deepgramChannel) {
+    console.error('[transcribe] Unexpected Deepgram response shape');
+    return { status: 502, body: errorResponse('Invalid response from upstream') };
   }
 
-  let cleanupQuota: RecordQuota | undefined;
-  if (dgRes.ok) {
-    try {
-      const dayBucket = getUTCDayBucket();
-      const cleanupCount = await getSuccessfulCallCount(
-        ensuredDevice.deviceId,
-        dayBucket,
-        CallCountType.CLEANUP,
-      );
-      const cleanupLimit = getEffectiveQuotaLimit(
-        ensuredDevice.dailyRecordLimit,
-        CallCountType.CLEANUP,
-      );
-      cleanupQuota = buildRecordQuota(cleanupLimit, cleanupCount, dayBucket);
-    } catch (error) {
-      console.error('[transcribe] Failed to load cleanup quota after successful transcription:', {
-        error: error instanceof Error ? error.message : String(error),
-        deviceId: ensuredDevice.deviceId,
-      });
-    }
+  if (deepgramChannel.transcript.trim() === '') {
+    console.warn('[transcribe] Empty transcript from Deepgram', {
+      language: requestedLanguage ?? 'auto',
+    });
+    return {
+      status: 422,
+      body: {
+        error: 'Speech could not be recognized',
+        reason: 'speech_not_recognized',
+        ...(requestedLanguage ? { language: requestedLanguage } : {}),
+      },
+    };
   }
+
+  await incrementCallCount(ensuredDevice.deviceId, dayBucket, CallCountType.TRANSCRIPTION, 'transcribe');
+
+  const cleanupQuota = await loadCleanupQuotaSafe(ensuredDevice, dayBucket, 'transcribe');
 
   return {
-    status: dgRes.ok ? 200 : 502,
-    body: dgRes.ok
-      ? {
-          transcript: deepgramChannel!.transcript,
-          detected_language: deepgramChannel!.detectedLanguage,
-          ...(cleanupQuota ? { quota: cleanupQuota } : {}),
-        }
-      : (payload as UpstreamErrorResponse),
+    status: 200,
+    body: {
+      transcript: deepgramChannel.transcript,
+      detected_language: deepgramChannel.detectedLanguage,
+      ...(cleanupQuota ? { quota: cleanupQuota } : {}),
+    },
   };
 }
