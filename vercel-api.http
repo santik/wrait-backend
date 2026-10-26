@@ -1,33 +1,91 @@
-### GET /api/hello
-GET https://wrait-backend.vercel.app/api/hello
+### wrait-backend API — run each request individually (JetBrains HTTP Client / REST Client).
+### Edit the variables below, then run requests with the gutter "Run" button.
+### Flow: run "POST /api/register" to get a token, paste it into @deviceToken above,
+### then run transcribe / cleanup / tag (they send X-Device-Token: {{deviceToken}}).
 
-###
+@baseUrl = https://wrait-backend-git-simplify-25102016-santiks-projects-0fd5708c.vercel.app/
+@proxySecret = SECRET_WRAIT_VALUE
+@deviceId = a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+@deviceId2 = a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123478
+### Token for the quota endpoints: paste one here, or run POST /api/register and
+### copy its "token" from the response into this value.
+@deviceToken =eyJkaWQiOiJhMWIyYzNkNGU1ZjY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2In0.-OjvqQVJj6pK5vVK6Po-hrdUiX7fQry28qGc_cm85NM
 
-### POST /api/register
-POST https://wrait-backend.vercel.app/api/register
+### GET /api/hello — health check (no auth)
+GET {{baseUrl}}/api/hello
+Accept: application/json
+
+### POST /api/register — Mode A: issues a token. Copy "token" from the response
+### into @deviceToken at the top, then run the quota requests below.
+POST {{baseUrl}}/api/register
 Content-Type: application/json
-X-Proxy-Secret: your_secret_value_here
-X-Device-Id: your_64_char_hex_device_id_here
+X-Proxy-Secret: {{proxySecret}}
+X-Device-Id: {{deviceId}}
 
-###
-### POST /api/transcribe
-POST https://wrait-backend.vercel.app/api/transcribe
-X-Proxy-Secret: SECRET_WRAIT_VALUE
-X-Device-Id: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+### POST /api/register — Mode B: present the stored token; returns quota, no new token, not rate-limited
+POST {{baseUrl}}/api/register
+Content-Type: application/json
+X-Proxy-Secret: {{proxySecret}}
+X-Device-Id: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### POST /api/transcribe — needs {{deviceToken}} (multipart audio; file must exist at ./tests/audio.wav)
+POST {{baseUrl}}/api/transcribe?language=en
+X-Proxy-Secret: {{proxySecret}}
+X-Device-Token: {{deviceToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="audio"; filename="audio.wav"
 Content-Type: audio/wav
 
-< tests/audio.wav
+< ./tests/audio.wav
+--WebAppBoundary--
 
-###
-
-
-### POST /api/cleanup
-POST https://wrait-backend.vercel.app/api/cleanup
+### POST /api/cleanup — needs {{deviceToken}}
+POST {{baseUrl}}/api/cleanup
 Content-Type: application/json
-X-Proxy-Secret: SECRET_WRAIT_VALUE
-X-Device-Id: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123478
+X-Proxy-Secret: {{proxySecret}}
+X-Device-Token: {{deviceToken}}
 
 {
   "transcript": "um, like, you know, the meeting was, uh, really productive, right? basically we covered all the points",
   "language": "en"
 }
+
+### POST /api/tag — needs {{deviceToken}}
+POST {{baseUrl}}/api/tag
+Content-Type: application/json
+X-Proxy-Secret: {{proxySecret}}
+X-Device-Token: {{deviceToken}}
+
+{
+  "text": "Today I went for a long run in the park and felt great afterwards. The weather was perfect.",
+  "tags": ["exercise", "nature", "mood", "work", "food", "travel"]
+}
+
+### Negative: POST /api/transcribe with NO token → expect 403
+POST {{baseUrl}}/api/transcribe?language=en
+X-Proxy-Secret: {{proxySecret}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="audio"; filename="audio.wav"
+Content-Type: audio/wav
+
+< ./tests/audio.wav
+--WebAppBoundary--
+
+### Migration window: POST /api/transcribe with legacy X-Device-Id only (no token)
+### → 403 when strict; 200 when the backend runs with REQUIRE_DEVICE_TOKEN=false
+POST {{baseUrl}}/api/transcribe?language=en
+X-Proxy-Secret: {{proxySecret}}
+X-Device-Id: {{deviceId}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="audio"; filename="audio.wav"
+Content-Type: audio/wav
+
+< ./tests/audio.wav
+--WebAppBoundary--

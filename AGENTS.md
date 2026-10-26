@@ -2,16 +2,36 @@
 
 **Stack:** raw-http | prisma | typescript
 
-0 routes | 2 models | 4 env vars | 6 import links
+5 routes | 3 models | typescript
 
 
 **High-impact files** (change carefully):
-- src/lib/response.ts (imported by 2 files)
-- src/lib/prisma.ts (imported by 2 files)
-- api/hello.ts (imported by 1 files)
-- api/register.ts (imported by 1 files)
+- src/contracts/http.ts (shared request/auth contract for every route)
+- src/lib/response.ts (shared response builder)
+- src/lib/prisma.ts (database client)
+- src/lib/deviceToken.ts (signed device-token sign/verify)
+- src/contracts/register.ts (dual-mode registration + rate limit)
 
-**Required env vars:** DATABASE_URL_UNPOOLED, NODE_ENV, PROXY_SECRET
+**Models:** Device, CallCount, RegistrationAttempt (`prisma/schema.prisma`)
+
+**Required env vars:** DATABASE_URL (or DATABASE_URL_UNPOOLED), NODE_ENV,
+PROXY_SECRET, DEVICE_TOKEN_SECRET (HMAC key for signed device tokens)
+**Optional env vars:** MAX_REGISTRATIONS_PER_IP_PER_DAY (per-IP/UTC-day cap on
+tokenless registrations, default 10); REQUIRE_DEVICE_TOKEN (default strict/true;
+set to "false" during the migration window to also accept legacy X-Device-Id on
+quota endpoints)
+**Upstream secrets:** DEEPGRAM_API_KEY, OPENAI_API_KEY, TYPESAFE_API_KEY
+
+---
+
+## Additional project references
+
+- [`docs/application-description.md`](docs/application-description.md) — what the
+  service does: API surface, quota model, device identity and abuse protection.
+- [`docs/agent-findings.md`](docs/agent-findings.md) — durable implementation
+  constraints for future sessions (auth contract, tokens, quota, migrations).
+- `specs/004-quota-abuse-protection/` — the quota-abuse-protection feature
+  (spec, plan, tasks, deployment runbook, review).
 
 ---
 

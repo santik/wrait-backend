@@ -1,12 +1,7 @@
 import type { VercelRequest } from '@vercel/node';
-import { CallCountType } from '@prisma/client';
 import { getUTCDayBucket } from '../lib/callCount.js';
 import { ensureDevice } from '../lib/device.js';
-import {
-  buildRecordQuota,
-  getEffectiveQuotaLimit,
-  getSuccessfulCallCount,
-} from '../lib/quota.js';
+import { loadCleanupQuotaSafe } from '../lib/quota.js';
 import { signDeviceToken } from '../lib/deviceToken.js';
 import {
   getClientIp,
@@ -90,30 +85,11 @@ export async function handleRegister(
 
     const body: RegisterResponseBody = { ok: true, ...(token ? { token } : {}) };
 
-    try {
-      const dayBucket = getUTCDayBucket();
-      const cleanupCount = await getSuccessfulCallCount(
-        ensuredDevice.deviceId,
-        dayBucket,
-        CallCountType.CLEANUP,
-      );
-      const cleanupLimit = getEffectiveQuotaLimit(
-        ensuredDevice.dailyRecordLimit,
-        CallCountType.CLEANUP,
-      );
-
-      return {
-        status: 201,
-        body: { ...body, quota: buildRecordQuota(cleanupLimit, cleanupCount, dayBucket) },
-      };
-    } catch (error) {
-      console.error('[register] Failed to load cleanup quota after successful registration:', {
-        error: error instanceof Error ? error.message : String(error),
-        deviceId: ensuredDevice.deviceId,
-      });
-
-      return { status: 201, body };
-    }
+    const cleanupQuota = await loadCleanupQuotaSafe(ensuredDevice, getUTCDayBucket(), 'register');
+    return {
+      status: 201,
+      body: cleanupQuota ? { ...body, quota: cleanupQuota } : body,
+    };
   } catch (error) {
     console.error('Failed to register device:', error);
     return { status: 500, body: errorResponse('Internal server error') };

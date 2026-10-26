@@ -2,11 +2,13 @@ import type { VercelRequest } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import { ALLOWED_LANGUAGES } from '../lib/allowedLanguages.js';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
-import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
-import { buildRecordQuota, type RecordQuota, verifyDailyRecordQuota } from '../lib/quota.js';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
+import { buildIncrementedQuota, type RecordQuota, verifyDailyRecordQuota } from '../lib/quota.js';
 import {
+  ensureDeviceOrError,
   errorResponse,
-  readRequestBody,
+  readJsonBody,
+  readUpstreamJson,
   requireQuotaDeviceId,
   requirePostMethod,
   requireProxySecret,
@@ -80,18 +82,22 @@ ${transcript}
 TRANSCRIPT_END`;
 }
 
-function isCleanupRequestBody(body: unknown): body is CleanupRequestBody {
-  if (!body || typeof body !== 'object') return false;
+function validateCleanupRequestBody(
+  body: unknown,
+): { valid: true; parsed: CleanupRequestBody } | { valid: false; error: string } {
+  const transcript = (body as { transcript?: unknown } | null)?.transcript;
+  if (typeof transcript !== 'string' || transcript.trim().length < TRANSCRIPT_MIN_LENGTH) {
+    return { valid: false, error: 'Missing or invalid transcript' };
+  }
 
-  const transcript = (body as { transcript?: unknown }).transcript;
   const language = (body as { language?: unknown }).language;
+  if (typeof language !== 'string' || !ALLOWED_LANGUAGES.has(language)) {
+    return { valid: false, error: 'Missing or invalid language' };
+  }
 
-  return (
-    typeof transcript === 'string' &&
-    transcript.trim().length >= TRANSCRIPT_MIN_LENGTH &&
-    typeof language === 'string' &&
-    ALLOWED_LANGUAGES.has(language)
-  );
+  // language is a free string narrowed only by the ALLOWED_LANGUAGES set, so the
+  // cast restores the generated literal-union type the old type-guard asserted.
+  return { valid: true, parsed: { transcript, language } as CleanupRequestBody };
 }
 
 export async function handleCleanup(
@@ -110,40 +116,17 @@ export async function handleCleanup(
     return { status: 500, body: errorResponse('Configuration error') };
   }
 
-  const contentType = req.headers['content-type'];
-  if (typeof contentType !== 'string' || !contentType.startsWith('application/json')) {
-    return { status: 400, body: errorResponse('Invalid Content-Type') };
+  const parsed = await readJsonBody(req, MAX_BODY_SIZE);
+  if ('status' in parsed) return parsed;
+
+  const validation = validateCleanupRequestBody(parsed.value);
+  if (!validation.valid) {
+    return { status: 400, body: errorResponse(validation.error) };
   }
+  const { transcript, language } = validation.parsed;
 
-  const requestBody = await readRequestBody(req, MAX_BODY_SIZE);
-  if ('status' in requestBody) return requestBody;
-
-  let parsedBody: unknown;
-  try {
-    parsedBody = JSON.parse(requestBody.body.toString('utf-8')) as unknown;
-  } catch {
-    return { status: 400, body: errorResponse('Invalid JSON body') };
-  }
-
-  if (!isCleanupRequestBody(parsedBody)) {
-    const transcript = (parsedBody as { transcript?: unknown }).transcript;
-    if (!transcript || typeof transcript !== 'string' || transcript.trim().length < TRANSCRIPT_MIN_LENGTH) {
-      return { status: 400, body: errorResponse('Missing or invalid transcript') };
-    }
-
-    return { status: 400, body: errorResponse('Missing or invalid language') };
-  }
-
-  let ensuredDevice: EnsuredDevice;
-  try {
-    ensuredDevice = await ensureDevice(device.deviceId);
-  } catch (error) {
-    console.error('[cleanup] Failed to validate device:', {
-      error: error instanceof Error ? error.message : String(error),
-      deviceId: device.deviceId,
-    });
-    return { status: 500, body: errorResponse('Internal server error') };
-  }
+  const ensuredDevice = await ensureDeviceOrError(device.deviceId, 'cleanup');
+  if ('status' in ensuredDevice) return ensuredDevice;
 
   const dayBucket = getUTCDayBucket();
   const quotaCheck = await verifyDailyRecordQuota(
@@ -158,34 +141,34 @@ export async function handleCleanup(
   }
 
   console.log('[cleanup] Request received', {
-    transcriptLength: parsedBody.transcript.length,
-    language: parsedBody.language,
+    transcriptLength: transcript.length,
+    language,
     hasSecret: !!req.headers['x-proxy-secret'],
   });
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-
   let oaiRes: Response;
   try {
-    oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
+    oaiRes = await fetchWithTimeout(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          reasoning_effort: 'none',
+          temperature: OPENAI_TEMPERATURE,
+          max_completion_tokens: OPENAI_MAX_TOKENS,
+          messages: [
+            { role: 'system', content: buildSystemPrompt(language) },
+            { role: 'user', content: buildUserPrompt(transcript.slice(0, TRANSCRIPT_MAX_LENGTH)) },
+          ],
+        }),
       },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        reasoning_effort: 'none',
-        temperature: OPENAI_TEMPERATURE,
-        max_completion_tokens: OPENAI_MAX_TOKENS,
-        messages: [
-          { role: 'system', content: buildSystemPrompt(parsedBody.language) },
-          { role: 'user', content: buildUserPrompt(parsedBody.transcript.slice(0, TRANSCRIPT_MAX_LENGTH)) },
-        ],
-      }),
-      signal: controller.signal,
-    });
+      OPENAI_TIMEOUT_MS,
+    );
   } catch (error) {
     console.error('[cleanup] OpenAI fetch error:', {
       error: error instanceof Error ? error.message : String(error),
@@ -195,29 +178,12 @@ export async function handleCleanup(
       return { status: 504, body: errorResponse('OpenAI request timeout') };
     }
     return { status: 502, body: errorResponse('upstream_error') };
-  } finally {
-    clearTimeout(timeout);
   }
 
-  if (!oaiRes.ok) {
-    console.error('[cleanup] OpenAI upstream returned non-OK status:', {
-      status: oaiRes.status,
-      deviceId: ensuredDevice.deviceId,
-    });
-    return { status: 502, body: errorResponse('upstream_error') };
-  }
+  const upstream = await readUpstreamJson(oaiRes, 'cleanup', ensuredDevice.deviceId);
+  if ('status' in upstream) return upstream;
 
-  let payload: unknown;
-  try {
-    payload = await oaiRes.json();
-  } catch {
-    console.error('[cleanup] OpenAI returned invalid JSON:', {
-      deviceId: ensuredDevice.deviceId,
-    });
-    return { status: 502, body: errorResponse('upstream_error') };
-  }
-
-  const cleanedText = (payload as { choices?: Array<{ message?: { content?: string } }> })
+  const cleanedText = (upstream.payload as { choices?: Array<{ message?: { content?: string } }> })
     ?.choices?.[0]?.message?.content;
 
   if (!cleanedText || typeof cleanedText !== 'string') {
@@ -228,7 +194,7 @@ export async function handleCleanup(
   }
 
   const didPersistQuotaUsage = await incrementCallCount(
-    device.deviceId,
+    ensuredDevice.deviceId,
     dayBucket,
     CallCountType.CLEANUP,
     'cleanup',
@@ -238,16 +204,8 @@ export async function handleCleanup(
     status: 200,
     body: {
       cleanedText,
-      wasTruncated: parsedBody.transcript.length > TRANSCRIPT_MAX_LENGTH,
-      ...(didPersistQuotaUsage
-        ? {
-            quota: buildRecordQuota(
-              quotaCheck.quota.limit,
-              quotaCheck.quota.count + 1,
-              dayBucket,
-            ),
-          }
-        : {}),
+      wasTruncated: transcript.length > TRANSCRIPT_MAX_LENGTH,
+      ...(didPersistQuotaUsage ? { quota: buildIncrementedQuota(quotaCheck.quota, dayBucket) } : {}),
     },
   };
 }

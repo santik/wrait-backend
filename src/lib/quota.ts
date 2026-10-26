@@ -1,5 +1,6 @@
 import { CallCountType } from '@prisma/client';
 import { getUTCDayBucket } from './callCount.js';
+import type { EnsuredDevice } from './device.js';
 import { prisma } from './prisma.js';
 
 export const DEFAULT_DAILY_RECORD_LIMIT = 3;
@@ -53,6 +54,33 @@ export function buildRecordQuota(limit: number, count: number, dayBucket: Date):
     remaining: Math.max(limit - count, 0),
     resetAt: getNextUTCDayReset(dayBucket).toISOString(),
   };
+}
+
+// Rebuilds a verified quota with one more use counted — the optimistic echo a
+// handler returns after a successful increment, without a second DB read.
+export function buildIncrementedQuota(quota: RecordQuota, dayBucket: Date): RecordQuota {
+  return buildRecordQuota(quota.limit, quota.count + 1, dayBucket);
+}
+
+// Best-effort CLEANUP-quota snapshot for a success response. Swallows and logs
+// its own failure so a quota read never fails the primary operation. Shared by
+// register and transcribe, which both attach this to their success body.
+export async function loadCleanupQuotaSafe(
+  ensuredDevice: EnsuredDevice,
+  dayBucket: Date,
+  label: string,
+): Promise<RecordQuota | undefined> {
+  try {
+    const count = await getSuccessfulCallCount(ensuredDevice.deviceId, dayBucket, CallCountType.CLEANUP);
+    const limit = getEffectiveQuotaLimit(ensuredDevice.dailyRecordLimit, CallCountType.CLEANUP);
+    return buildRecordQuota(limit, count, dayBucket);
+  } catch (error) {
+    console.error(`[${label}] Failed to load cleanup quota after success:`, {
+      error: error instanceof Error ? error.message : String(error),
+      deviceId: ensuredDevice.deviceId,
+    });
+    return undefined;
+  }
 }
 
 export function buildDailyRecordLimitExceededResponse(

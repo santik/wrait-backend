@@ -1,11 +1,13 @@
 import type { VercelRequest } from '@vercel/node';
 import { CallCountType } from '@prisma/client';
 import { getUTCDayBucket, incrementCallCount } from '../lib/callCount.js';
-import { ensureDevice, type EnsuredDevice } from '../lib/device.js';
-import { buildRecordQuota, type RecordQuota, verifyDailyRecordQuota } from '../lib/quota.js';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout.js';
+import { buildIncrementedQuota, type RecordQuota, verifyDailyRecordQuota } from '../lib/quota.js';
 import {
+  ensureDeviceOrError,
   errorResponse,
-  readRequestBody,
+  readJsonBody,
+  readUpstreamJson,
   requireQuotaDeviceId,
   requirePostMethod,
   requireProxySecret,
@@ -21,8 +23,6 @@ const TAGS_MIN = 2;
 const TAGS_MAX = 50;
 const TAG_MAX_LENGTH = 100;
 const KNOWN_FIELDS = new Set(['text', 'tags']);
-
-const textEncoder = new TextEncoder();
 
 type TagRequestBody = {
   text: string;
@@ -52,7 +52,7 @@ function validateTagRequestBody(
     return { valid: false, error: 'Missing or empty text' };
   }
 
-  if (textEncoder.encode(obj.text).length > TEXT_MAX_UTF8_BYTES) {
+  if (Buffer.byteLength(obj.text, 'utf8') > TEXT_MAX_UTF8_BYTES) {
     return { valid: false, error: `Text exceeds maximum length of ${TEXT_MAX_UTF8_BYTES} UTF-8 bytes` };
   }
 
@@ -101,38 +101,18 @@ export async function handleTag(
     return { status: 500, body: errorResponse('Configuration error') };
   }
 
-  const contentType = req.headers['content-type'];
-  if (typeof contentType !== 'string' || !contentType.startsWith('application/json')) {
-    return { status: 400, body: errorResponse('Invalid Content-Type') };
-  }
+  const parsed = await readJsonBody(req, MAX_BODY_SIZE);
+  if ('status' in parsed) return parsed;
 
-  const requestBody = await readRequestBody(req, MAX_BODY_SIZE);
-  if ('status' in requestBody) return requestBody;
-
-  let parsedBody: unknown;
-  try {
-    parsedBody = JSON.parse(requestBody.body.toString('utf-8')) as unknown;
-  } catch {
-    return { status: 400, body: errorResponse('Invalid JSON body') };
-  }
-
-  const validation = validateTagRequestBody(parsedBody);
+  const validation = validateTagRequestBody(parsed.value);
   if (!validation.valid) {
     return { status: 400, body: errorResponse(validation.error) };
   }
 
   const { text, tags } = validation.parsed;
 
-  let ensuredDevice: EnsuredDevice;
-  try {
-    ensuredDevice = await ensureDevice(device.deviceId);
-  } catch (error) {
-    console.error('[tag] Failed to validate device:', {
-      error: error instanceof Error ? error.message : String(error),
-      deviceId: device.deviceId,
-    });
-    return { status: 500, body: errorResponse('Internal server error') };
-  }
+  const ensuredDevice = await ensureDeviceOrError(device.deviceId, 'tag');
+  if ('status' in ensuredDevice) return ensuredDevice;
 
   const dayBucket = getUTCDayBucket();
   const quotaCheck = await verifyDailyRecordQuota(
@@ -159,24 +139,24 @@ export async function handleTag(
     };
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TYPESAFE_TIMEOUT_MS);
-
   let typesafeRes: Response;
   try {
-    typesafeRes = await fetch('https://api.typesafe.ai/v1/systemone', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.TYPESAFE_API_KEY}`,
-        'Content-Type': 'application/json',
+    typesafeRes = await fetchWithTimeout(
+      'https://api.typesafe.ai/v1/systemone',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.TYPESAFE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          state: text,
+          model: TYPESAFE_MODEL,
+          questions,
+        }),
       },
-      body: JSON.stringify({
-        state: text,
-        model: TYPESAFE_MODEL,
-        questions,
-      }),
-      signal: controller.signal,
-    });
+      TYPESAFE_TIMEOUT_MS,
+    );
   } catch (error) {
     console.error('[tag] TypeSafe fetch error:', {
       error: error instanceof Error ? error.message : String(error),
@@ -186,29 +166,12 @@ export async function handleTag(
       return { status: 504, body: errorResponse('TypeSafe request timeout') };
     }
     return { status: 502, body: errorResponse('upstream_error') };
-  } finally {
-    clearTimeout(timeout);
   }
 
-  if (!typesafeRes.ok) {
-    console.error('[tag] TypeSafe upstream returned non-OK status:', {
-      status: typesafeRes.status,
-      deviceId: ensuredDevice.deviceId,
-    });
-    return { status: 502, body: errorResponse('upstream_error') };
-  }
+  const upstream = await readUpstreamJson(typesafeRes, 'tag', ensuredDevice.deviceId);
+  if ('status' in upstream) return upstream;
 
-  let payload: unknown;
-  try {
-    payload = await typesafeRes.json();
-  } catch {
-    console.error('[tag] TypeSafe returned invalid JSON:', {
-      deviceId: ensuredDevice.deviceId,
-    });
-    return { status: 502, body: errorResponse('upstream_error') };
-  }
-
-  const answers = (payload as { answers?: Record<string, { noul?: number }> })?.answers;
+  const answers = (upstream.payload as { answers?: Record<string, { noul?: number }> })?.answers;
 
   if (!answers || typeof answers !== 'object') {
     console.error('[tag] TypeSafe returned unexpected response shape:', {
@@ -217,11 +180,13 @@ export async function handleTag(
     return { status: 502, body: errorResponse('upstream_error') };
   }
 
-  const tagProbabilities = tags.map((tag) => {
-    const noul = answers[tag]?.noul;
-    const probability = typeof noul === 'number' && noul >= 0 && noul <= 1 ? noul : 0;
-    return { tag, probability };
-  }).sort((a, b) => b.probability - a.probability);
+  const tagProbabilities = tags
+    .map((tag) => {
+      const noul = answers[tag]?.noul;
+      const probability = typeof noul === 'number' && noul >= 0 && noul <= 1 ? noul : 0;
+      return { tag, probability };
+    })
+    .sort((a, b) => b.probability - a.probability);
 
   const didPersistQuotaUsage = await incrementCallCount(
     ensuredDevice.deviceId,
@@ -234,15 +199,7 @@ export async function handleTag(
     status: 200,
     body: {
       tags: tagProbabilities,
-      ...(didPersistQuotaUsage
-        ? {
-            quota: buildRecordQuota(
-              quotaCheck.quota.limit,
-              quotaCheck.quota.count + 1,
-              dayBucket,
-            ),
-          }
-        : {}),
+      ...(didPersistQuotaUsage ? { quota: buildIncrementedQuota(quotaCheck.quota, dayBucket) } : {}),
     },
   };
 }
