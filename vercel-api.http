@@ -3,7 +3,7 @@
 ### Flow: run "POST /api/register" to get a token, paste it into @deviceToken above,
 ### then run transcribe / cleanup / tag (they send X-Device-Token: {{deviceToken}}).
 
-@baseUrl = https://wrait-backend-git-feature-devi-fbc9f5-santiks-projects-0fd5708c.vercel.app
+@baseUrl = https://wrait-backend-git-simplify-25102016-santiks-projects-0fd5708c.vercel.app/
 @proxySecret = SECRET_WRAIT_VALUE
 @deviceId = a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 @deviceId2 = a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123478
