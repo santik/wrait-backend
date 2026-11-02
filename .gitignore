@@ -1,0 +1,26 @@
+.idea
+.claude
+node_modules
+.vercel
+.env
+.codesight
+.DS_Store
+CLAUDE.md
+changes
+src/generated/
+**/plan.md
+**/tasks.md
+**/review.md
+vercel-api.sh
+tests/giorgia_melonis.mp3
+vercel-api.http
+
+# --- Open-source: internal docs & SDD history (kept local, not published) ---
+AGENTS.md
+CONSTITUTION.md
+codebase-analysis-docs/
+docs/agent-findings.md
+docs/application-description.md
+docs/spec-driven-workflow.md
+quota_sql.md
+/specs/

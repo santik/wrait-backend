@@ -1,0 +1,662 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import handler from '../api/cleanup.js';
+import { prisma } from '../src/lib/prisma.js';
+import { tokenFor } from './helpers/deviceToken.js';
+
+vi.mock('../src/lib/prisma.js', () => ({
+  prisma: {
+    device: {
+      upsert: vi.fn(),
+    },
+    callCount: {
+      findUnique: vi.fn(),
+    },
+    $executeRaw: vi.fn(),
+  },
+}));
+
+const mockFetch = vi.fn();
+
+function mockRes() {
+  const res = {
+    statusCode: 200,
+    body: undefined as unknown,
+    headers: {} as Record<string, string>,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(data: unknown) {
+      this.body = data;
+      return this;
+    },
+    setHeader(key: string, value: string) {
+      this.headers[key] = value;
+      return this;
+    },
+  };
+  return res as unknown as VercelResponse;
+}
+
+type MockResShape = { statusCode: number; body: unknown; headers: Record<string, string> };
+
+function mockReq(
+  method: string,
+  headers: Record<string, string>,
+  body?: unknown,
+) {
+  const bodyBuffer =
+    body instanceof Buffer ? body : body !== undefined ? Buffer.from(JSON.stringify(body)) : undefined;
+  const chunks = bodyBuffer ? [bodyBuffer] : [];
+  let idx = 0;
+  return {
+    method,
+    headers,
+    url: '/api/cleanup',
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          if (idx < chunks.length) return { value: chunks[idx++], done: false as const };
+          return { value: undefined, done: true as const };
+        },
+      };
+    },
+  } as unknown as VercelRequest;
+}
+
+const validHeaders = {
+  'x-proxy-secret': 'test-secret',
+  'x-device-token': tokenFor('a'.repeat(64)),
+  'content-type': 'application/json',
+};
+
+const validBody = { transcript: 'um hello world so like', language: 'en-US' };
+
+const openaiSuccess = {
+  choices: [{ message: { content: 'Hello world.' } }],
+};
+
+function extractDelimitedTranscript(content: string): string {
+  const match = content.match(/TRANSCRIPT_START\n([\s\S]*)\nTRANSCRIPT_END$/);
+  if (!match) throw new Error('Missing transcript delimiters');
+  return match[1];
+}
+
+describe('POST /api/cleanup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', mockFetch);
+    process.env.PROXY_SECRET = 'test-secret';
+    process.env.OPENAI_API_KEY = 'sk-test-key';
+    vi.mocked(prisma.device.upsert).mockResolvedValue({
+      deviceId: 'a'.repeat(64),
+      registeredAt: new Date(),
+      dailyRecordLimit: null,
+    } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    process.env.OPENAI_API_KEY = 'sk-test-key';
+  });
+
+  it('rejects non-POST requests with 405', async () => {
+    const req = mockReq('GET', {});
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(405);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing proxy secret with 401', async () => {
+    const req = mockReq('POST', {}, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(401);
+    expect(r.body).toEqual({ error: 'Unauthorized' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects wrong proxy secret with 401', async () => {
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'wrong', 'x-device-token': tokenFor('a'.repeat(64)), 'content-type': 'application/json' },
+      validBody,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(401);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing device token with 403', async () => {
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'content-type': 'application/json' },
+      validBody,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(403);
+    expect(r.body).toEqual({ error: 'Invalid or missing device token' });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a raw X-Device-Id without a token and a forged token with 403', async () => {
+    for (const extra of <Record<string, string>[]>[
+      { 'x-device-id': 'a'.repeat(64) },
+      { 'x-device-token': 'forged.token' },
+    ]) {
+      const req = mockReq(
+        'POST',
+        { 'x-proxy-secret': 'test-secret', 'content-type': 'application/json', ...extra },
+        validBody,
+      );
+      const res = mockRes();
+      await handler(req, res);
+      expect((res as unknown as MockResShape).statusCode).toBe(403);
+    }
+    expect(prisma.device.upsert).not.toHaveBeenCalled();
+  });
+
+  it('keys quota on the device id carried by the token', async () => {
+    const otherId = 'b'.repeat(64);
+    vi.mocked(prisma.device.upsert).mockResolvedValue({
+      deviceId: otherId,
+      registeredAt: new Date(),
+      dailyRecordLimit: null,
+    } as never);
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 99 } as never);
+    const req = mockReq(
+      'POST',
+      { ...validHeaders, 'x-device-token': tokenFor(otherId), 'x-device-id': 'c'.repeat(64) },
+      validBody,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    expect((res as unknown as MockResShape).statusCode).toBe(429);
+    expect(prisma.device.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { deviceId: otherId } }),
+    );
+    expect(prisma.callCount.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { deviceId_date_type: expect.objectContaining({ deviceId: otherId }) },
+      }),
+    );
+  });
+
+  it('returns 500 when OPENAI_API_KEY is not set', async () => {
+    delete process.env.OPENAI_API_KEY;
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(500);
+    expect(r.body).toEqual({ error: 'Configuration error' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects wrong Content-Type with 400', async () => {
+    const req = mockReq(
+      'POST',
+      { 'x-proxy-secret': 'test-secret', 'x-device-token': tokenFor('a'.repeat(64)), 'content-type': 'text/plain' },
+      validBody,
+    );
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Invalid Content-Type' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects body exceeding 1MB with 413', async () => {
+    const largeBody = Buffer.alloc(2 * 1024 * 1024);
+    const req = mockReq('POST', validHeaders, largeBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(413);
+    expect(r.body).toEqual({ error: 'Request too large' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid JSON body with 400', async () => {
+    const req = mockReq('POST', validHeaders, Buffer.from('not valid json'));
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Invalid JSON body' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing transcript with 400', async () => {
+    const req = mockReq('POST', validHeaders, { language: 'en-US' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid transcript' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects empty transcript with 400', async () => {
+    const req = mockReq('POST', validHeaders, { transcript: '', language: 'en-US' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid transcript' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects whitespace-only transcript with 400', async () => {
+    const req = mockReq('POST', validHeaders, { transcript: '   ', language: 'en-US' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid transcript' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects transcript shorter than 10 chars with 400', async () => {
+    const req = mockReq('POST', validHeaders, { transcript: 'hi there', language: 'en-US' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid transcript' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing language with 400', async () => {
+    const req = mockReq('POST', validHeaders, { transcript: 'hello world today' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid language' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects language not in allowed list with 400', async () => {
+    const req = mockReq('POST', validHeaders, { transcript: 'hello world today', language: 'xx-ZZ' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid language' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid BCP-47 language with 400', async () => {
+    const req = mockReq('POST', validHeaders, { transcript: 'hello world today', language: '123-invalid' });
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(400);
+    expect(r.body).toEqual({ error: 'Missing or invalid language' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when device upsert fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => { });
+    vi.mocked(prisma.device.upsert).mockRejectedValue(new Error('DB down'));
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(500);
+    expect(r.body).toEqual({ error: 'Internal server error' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('upserts device and continues', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(prisma.device.upsert).toHaveBeenCalledWith({
+      where: { deviceId: 'a'.repeat(64) },
+      update: {},
+      create: { deviceId: 'a'.repeat(64) },
+      select: {
+        deviceId: true,
+        dailyRecordLimit: true,
+      },
+    });
+  });
+
+  it('returns 429 when the daily record limit is reached', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-21T10:00:00.000Z'));
+    vi.mocked(prisma.callCount.findUnique).mockResolvedValue({ count: 3 } as never);
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(429);
+    expect(r.body).toEqual({
+      error: 'Daily record limit exceeded',
+      quota: {
+        limit: 3,
+        count: 3,
+        remaining: 0,
+        resetAt: '2026-05-22T00:00:00.000Z',
+      },
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns cleanedText on success and increments call count', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual({
+      cleanedText: 'Hello world.',
+      wasTruncated: false,
+      quota: {
+        limit: 3,
+        count: 1,
+        remaining: 2,
+        resetAt: expect.any(String),
+      },
+    });
+    expect(prisma.$executeRaw).toHaveBeenCalledOnce();
+  });
+
+  it('sends correct model, reasoning_effort, temperature, and max_completion_tokens to OpenAI', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    await handler(mockReq('POST', validHeaders, validBody), mockRes());
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
+    expect(url).toBe('https://api.openai.com/v1/chat/completions');
+    expect(init.headers['Authorization']).toBe('Bearer sk-test-key');
+
+    const sent = JSON.parse(init.body as string) as {
+      model: string;
+      reasoning_effort: string;
+      temperature: number;
+      max_completion_tokens: number;
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(sent.model).toBe('gpt-6-luna');
+    expect(sent.reasoning_effort).toBe('none');
+    expect(sent.temperature).toBe(0.3);
+    expect(sent.max_completion_tokens).toBe(1024);
+    expect(sent.messages[0].role).toBe('system');
+    expect(sent.messages[0].content).toContain('en-US');
+    expect(sent.messages[0].content).toContain('not a writing prompt, story prompt');
+    expect(sent.messages[0].content).toContain('Continue the speaker');
+    expect(sent.messages[1].role).toBe('user');
+    expect(sent.messages[1].content).toContain('TRANSCRIPT_START');
+    expect(sent.messages[1].content).toContain('TRANSCRIPT_END');
+    expect(sent.messages[1].content).toContain('Do not continue, complete, or add to the transcript');
+    expect(extractDelimitedTranscript(sent.messages[1].content)).toBe(validBody.transcript);
+  });
+
+  it('frames story-like transcripts as source text rather than continuation prompts', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    const storyLikeTranscript = 'The door opened and then I saw';
+    await handler(
+      mockReq('POST', validHeaders, { transcript: storyLikeTranscript, language: 'en-US' }),
+      mockRes(),
+    );
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+
+    expect(sent.messages[0].content).toContain('Complete a sentence, scene, paragraph, quote, or story beat');
+    expect(sent.messages[1].content).toContain('even if it reads like an unfinished story');
+    expect(extractDelimitedTranscript(sent.messages[1].content)).toBe(storyLikeTranscript);
+  });
+
+  it('truncates transcript to 3000 chars and sets wasTruncated: true', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    const longTranscript = 'x'.repeat(5000);
+    const res = mockRes();
+    await handler(mockReq('POST', validHeaders, { transcript: longTranscript, language: 'en-US' }), res);
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { messages: Array<{ content: string }> };
+    expect(extractDelimitedTranscript(sent.messages[1].content)).toHaveLength(3000);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual({
+      cleanedText: 'Hello world.',
+      wasTruncated: true,
+      quota: {
+        limit: 3,
+        count: 1,
+        remaining: 2,
+        resetAt: expect.any(String),
+      },
+    });
+  });
+
+  it('returns 504 when OpenAI request times out', async () => {
+    mockFetch.mockRejectedValue(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(504);
+    expect(r.body).toEqual({ error: 'OpenAI request timeout' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when OpenAI returns non-200', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 429 });
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(r.body).toEqual({ error: 'upstream_error' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when fetch throws network error', async () => {
+    mockFetch.mockRejectedValue(new Error('Network error'));
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(r.body).toEqual({ error: 'upstream_error' });
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when OpenAI returns invalid JSON', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => { throw new Error('bad json'); },
+    });
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when OpenAI response has unexpected shape', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [] }) });
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(502);
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('still returns 200 when call count update fails', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+    vi.mocked(prisma.$executeRaw).mockRejectedValue(new Error('DB error'));
+    vi.spyOn(console, 'error').mockImplementation(() => { });
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual({ cleanedText: 'Hello world.', wasTruncated: false });
+  });
+
+  it('retries transient counter errors and succeeds', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+    vi.mocked(prisma.$executeRaw)
+      .mockRejectedValueOnce(new Error('connection timeout'))
+      .mockResolvedValueOnce(1 as never);
+
+    const req = mockReq('POST', validHeaders, validBody);
+    const res = mockRes();
+
+    await handler(req, res);
+
+    const r = res as unknown as MockResShape;
+    expect(r.statusCode).toBe(200);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it('stores counter in UTC day bucket', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-17T23:59:59.123Z'));
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+
+    await handler(mockReq('POST', validHeaders, validBody), mockRes());
+
+    const dateArg = vi.mocked(prisma.$executeRaw).mock.calls[0][2] as Date;
+    expect(dateArg).toBeInstanceOf(Date);
+    expect(dateArg.toISOString()).toBe('2026-04-17T00:00:00.000Z');
+  });
+
+  it('allows a request after the UTC reset when quota was full before midnight', async () => {
+    vi.useFakeTimers();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => openaiSuccess });
+    vi.mocked(prisma.callCount.findUnique).mockImplementation(((args: Record<string, unknown>) => {
+      const where = args.where as { deviceId_date_type: { date: Date } };
+      const date = where.deviceId_date_type.date;
+      if (date.toISOString() === '2026-05-21T00:00:00.000Z') {
+        return Promise.resolve({ count: 3 } as never) as never;
+      }
+      return Promise.resolve(null) as never;
+    }) as typeof prisma.callCount.findUnique);
+
+    vi.setSystemTime(new Date('2026-05-21T23:59:59.000Z'));
+    const beforeResetRes = mockRes();
+    await handler(mockReq('POST', validHeaders, validBody), beforeResetRes);
+
+    expect((beforeResetRes as unknown as MockResShape).statusCode).toBe(429);
+    expect((beforeResetRes as unknown as MockResShape).body).toEqual({
+      error: 'Daily record limit exceeded',
+      quota: {
+        limit: 3,
+        count: 3,
+        remaining: 0,
+        resetAt: '2026-05-22T00:00:00.000Z',
+      },
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date('2026-05-22T00:00:01.000Z'));
+    const afterResetRes = mockRes();
+    await handler(mockReq('POST', validHeaders, validBody), afterResetRes);
+
+    expect((afterResetRes as unknown as MockResShape).statusCode).toBe(200);
+    expect((afterResetRes as unknown as MockResShape).body).toEqual({
+      cleanedText: 'Hello world.',
+      wasTruncated: false,
+      quota: {
+        limit: 3,
+        count: 1,
+        remaining: 2,
+        resetAt: '2026-05-23T00:00:00.000Z',
+      },
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+});

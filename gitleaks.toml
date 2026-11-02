@@ -1,0 +1,30 @@
+# gitleaks config for open-source readiness scan (spec 005).
+# --no-git ignores .gitignore, so we exclude vendored / build / lockfile paths
+# that are never part of the published source and only create noise.
+
+title = "wrait-backend OSS readiness scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Non-published or vendored paths, and documented placeholder values"
+paths = [
+  '''node_modules/''',
+  '''\.vercel/''',
+  '''build/''',
+  '''dist/''',
+  '''package-lock\.json''',
+  '''\.gitleaks\.toml''',
+  '''gitleaks\.toml''',
+  # Gitignored / not-published: present on disk but excluded from the published set.
+  '''\.env''',
+  '''vercel-api\.http''',
+]
+# README documents env vars using obvious placeholder values; these are not secrets.
+regexes = [
+  '''sk-xxxxxxxxx''',
+  '''dg_xxxxxxxxx''',
+  '''replace-with-a-long-random-secret''',
+  '''user:password@''',
+]
